@@ -6,7 +6,9 @@ struct JobProgressView: View {
 
     @State private var status: JobStatusResponse?
     @State private var errorMessage: String?
+    @State private var errorDetail: String?
     @State private var showVariants: Bool = false
+    @State private var showErrorDetails: Bool = false
 
     var body: some View {
         VStack(spacing: 14) {
@@ -20,6 +22,11 @@ struct JobProgressView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                if let errorDetail, !errorDetail.isEmpty {
+                    Button("Show details") { showErrorDetails = true }
+                        .buttonStyle(.bordered)
+                        .padding(.top, 4)
+                }
                 Button("Try again") {
                     Task { await poll() }
                 }
@@ -61,6 +68,22 @@ struct JobProgressView: View {
         .navigationDestination(isPresented: $showVariants) {
             VariantsView(jobId: jobId)
         }
+        .sheet(isPresented: $showErrorDetails) {
+            NavigationStack {
+                ScrollView {
+                    Text(errorDetail ?? "")
+                        .font(.system(.footnote, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                }
+                .navigationTitle("Details")
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { showErrorDetails = false }
+                    }
+                }
+            }
+        }
         .task {
             await poll()
         }
@@ -99,6 +122,7 @@ struct JobProgressView: View {
 
     private func poll() async {
         errorMessage = nil
+        errorDetail = nil
         let api = APIClient(baseURL: AppConfig.apiBaseURL, accessTokenProvider: { session.accessToken })
 
         while !Task.isCancelled {
@@ -112,6 +136,7 @@ struct JobProgressView: View {
                 }
                 if next.status == .failed {
                     errorMessage = next.message ?? "Job failed."
+                    errorDetail = next.errorDetail
                     return
                 }
             } catch {

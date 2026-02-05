@@ -63,6 +63,8 @@ struct JobStatusResponse: Decodable {
     let message: String?
     let progressCurrent: Int?
     let progressTotal: Int?
+    let errorCode: String?
+    let errorDetail: String?
 }
 
 struct ListJobsResponse: Decodable {

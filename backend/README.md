@@ -30,6 +30,24 @@ Notes:
 - The app’s Debug build allows HTTP (ATS is relaxed). For production, you’ll want HTTPS.
 - Instagram URLs often require authentication (cookies). For reliable tests, use **Reference → Upload** in the iOS app.
 
+## Instagram / YouTube reference links (AWS)
+
+In AWS, the Batch worker uses `yt-dlp` to download reference URLs. Many Instagram (and some YouTube) URLs require a logged-in session.
+
+The worker is already wired to read a Netscape-format `cookies.txt` from AWS Secrets Manager:
+
+- `reelclaw-prod/ytdlp_cookies` (prod)
+- `reelclaw-staging/ytdlp_cookies` (staging)
+
+To set/update it, export a `cookies.txt` from a browser where you’re logged in, then run:
+
+```bash
+set -a; source .env.production; set +a
+python3 backend/scripts/set_ytdlp_cookies_secret.py --env prod --cookies-file /path/to/cookies.txt
+```
+
+This is a **sensitive secret**. Do not commit it, and rotate it when it expires.
+
 ## API flow (current)
 
 The iOS client uses a 2-step job flow:

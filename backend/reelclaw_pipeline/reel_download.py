@@ -133,7 +133,8 @@ def download_reel(url: str, *, output_dir: Path, timeout_s: float = 180.0) -> Pa
         _run(cmd, timeout_s=timeout_s)
     except Exception as exc:
         msg = str(exc)
-        if any(k in msg.lower() for k in ("require_login", "login required", "not-logged-in", "sign in", "cookies")):
+        lower = msg.lower()
+        if any(k in lower for k in ("require_login", "login required", "not-logged-in", "sign in", "cookies")):
             secret_id = os.getenv("REELCLAW_YTDLP_COOKIES_SECRET_ID", "").strip()
             secret_hint = (
                 f"Set AWS Secrets Manager `{secret_id}` to a Netscape cookies.txt (raw or base64)."
@@ -142,6 +143,18 @@ def download_reel(url: str, *, output_dir: Path, timeout_s: float = 180.0) -> Pa
             )
             raise RuntimeError(
                 "Reference download blocked (login required). " + secret_hint + " This enables Instagram/YouTube downloads."
+            ) from exc
+        if any(k in lower for k in ("unavailable for certain audiences", "certain audiences", "content may be inappropriate")):
+            secret_id = os.getenv("REELCLAW_YTDLP_COOKIES_SECRET_ID", "").strip()
+            secret_hint = (
+                f"Set AWS Secrets Manager `{secret_id}` to a Netscape cookies.txt (raw or base64)."
+                if secret_id
+                else "Set REELCLAW_YTDLP_COOKIES_B64 (base64 of a Netscape cookies.txt file)."
+            )
+            raise RuntimeError(
+                "Reference download blocked (Instagram: unavailable for certain audiences). "
+                + secret_hint
+                + " If the reel is viewable when logged-in, the cookies account must be able to view it; otherwise use Reference → Upload."
             ) from exc
         raise
 
