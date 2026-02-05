@@ -1,0 +1,570 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXContainerItemProxy section */
+		962634A22F2E1A0300001C0B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 962634892F2E19FF00001C0B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 962634902F2E19FF00001C0B;
+			remoteInfo = ReelClaw;
+		};
+		962634AC2F2E1A0300001C0B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 962634892F2E19FF00001C0B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 962634902F2E19FF00001C0B;
+			remoteInfo = ReelClaw;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		962634912F2E19FF00001C0B /* ReelClaw.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ReelClaw.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		962634A12F2E1A0300001C0B /* ReelClawTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ReelClawTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		962634AB2F2E1A0300001C0B /* ReelClawUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ReelClawUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		962634932F2E19FF00001C0B /* ReelClaw */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ReelClaw;
+			sourceTree = "<group>";
+		};
+		962634A42F2E1A0300001C0B /* ReelClawTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ReelClawTests;
+			sourceTree = "<group>";
+		};
+		962634AE2F2E1A0300001C0B /* ReelClawUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ReelClawUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		9626348E2F2E19FF00001C0B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9626349E2F2E1A0300001C0B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		962634A82F2E1A0300001C0B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		962634882F2E19FF00001C0B = {
+			isa = PBXGroup;
+			children = (
+				962634932F2E19FF00001C0B /* ReelClaw */,
+				962634A42F2E1A0300001C0B /* ReelClawTests */,
+				962634AE2F2E1A0300001C0B /* ReelClawUITests */,
+				962634922F2E19FF00001C0B /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		962634922F2E19FF00001C0B /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				962634912F2E19FF00001C0B /* ReelClaw.app */,
+				962634A12F2E1A0300001C0B /* ReelClawTests.xctest */,
+				962634AB2F2E1A0300001C0B /* ReelClawUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		962634902F2E19FF00001C0B /* ReelClaw */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 962634B52F2E1A0300001C0B /* Build configuration list for PBXNativeTarget "ReelClaw" */;
+			buildPhases = (
+				9626348D2F2E19FF00001C0B /* Sources */,
+				9626348E2F2E19FF00001C0B /* Frameworks */,
+				9626348F2F2E19FF00001C0B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				962634932F2E19FF00001C0B /* ReelClaw */,
+			);
+			name = ReelClaw;
+			packageProductDependencies = (
+			);
+			productName = ReelClaw;
+			productReference = 962634912F2E19FF00001C0B /* ReelClaw.app */;
+			productType = "com.apple.product-type.application";
+		};
+		962634A02F2E1A0300001C0B /* ReelClawTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 962634B82F2E1A0300001C0B /* Build configuration list for PBXNativeTarget "ReelClawTests" */;
+			buildPhases = (
+				9626349D2F2E1A0300001C0B /* Sources */,
+				9626349E2F2E1A0300001C0B /* Frameworks */,
+				9626349F2F2E1A0300001C0B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				962634A32F2E1A0300001C0B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				962634A42F2E1A0300001C0B /* ReelClawTests */,
+			);
+			name = ReelClawTests;
+			packageProductDependencies = (
+			);
+			productName = ReelClawTests;
+			productReference = 962634A12F2E1A0300001C0B /* ReelClawTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		962634AA2F2E1A0300001C0B /* ReelClawUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 962634BB2F2E1A0300001C0B /* Build configuration list for PBXNativeTarget "ReelClawUITests" */;
+			buildPhases = (
+				962634A72F2E1A0300001C0B /* Sources */,
+				962634A82F2E1A0300001C0B /* Frameworks */,
+				962634A92F2E1A0300001C0B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				962634AD2F2E1A0300001C0B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				962634AE2F2E1A0300001C0B /* ReelClawUITests */,
+			);
+			name = ReelClawUITests;
+			packageProductDependencies = (
+			);
+			productName = ReelClawUITests;
+			productReference = 962634AB2F2E1A0300001C0B /* ReelClawUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		962634892F2E19FF00001C0B /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1620;
+				LastUpgradeCheck = 1620;
+				TargetAttributes = {
+					962634902F2E19FF00001C0B = {
+						CreatedOnToolsVersion = 16.2;
+					};
+					962634A02F2E1A0300001C0B = {
+						CreatedOnToolsVersion = 16.2;
+						TestTargetID = 962634902F2E19FF00001C0B;
+					};
+					962634AA2F2E1A0300001C0B = {
+						CreatedOnToolsVersion = 16.2;
+						TestTargetID = 962634902F2E19FF00001C0B;
+					};
+				};
+			};
+			buildConfigurationList = 9626348C2F2E19FF00001C0B /* Build configuration list for PBXProject "ReelClaw" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 962634882F2E19FF00001C0B;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 962634922F2E19FF00001C0B /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				962634902F2E19FF00001C0B /* ReelClaw */,
+				962634A02F2E1A0300001C0B /* ReelClawTests */,
+				962634AA2F2E1A0300001C0B /* ReelClawUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		9626348F2F2E19FF00001C0B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9626349F2F2E1A0300001C0B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		962634A92F2E1A0300001C0B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		9626348D2F2E19FF00001C0B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9626349D2F2E1A0300001C0B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		962634A72F2E1A0300001C0B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		962634A32F2E1A0300001C0B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 962634902F2E19FF00001C0B /* ReelClaw */;
+			targetProxy = 962634A22F2E1A0300001C0B /* PBXContainerItemProxy */;
+		};
+		962634AD2F2E1A0300001C0B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 962634902F2E19FF00001C0B /* ReelClaw */;
+			targetProxy = 962634AC2F2E1A0300001C0B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		962634B32F2E1A0300001C0B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		962634B42F2E1A0300001C0B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+			962634B62F2E1A0300001C0B /* Debug */ = {
+				isa = XCBuildConfiguration;
+				buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ReelClaw/ReelClawDebug.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"ReelClaw/Preview Content\"";
+				DEVELOPMENT_TEAM = 34Y8T25XFX;
+				ENABLE_PREVIEWS = YES;
+					GENERATE_INFOPLIST_FILE = YES;
+					INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
+					INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ReelClaw needs local network access to connect to your editing backend during development.";
+					INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "ReelClaw needs access to save exported videos to your Photos library.";
+					INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+					INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Stuke.ReelClaw;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+			962634B72F2E1A0300001C0B /* Release */ = {
+				isa = XCBuildConfiguration;
+				buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = ReelClaw/ReelClawRelease.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"ReelClaw/Preview Content\"";
+				DEVELOPMENT_TEAM = 34Y8T25XFX;
+				ENABLE_PREVIEWS = YES;
+					GENERATE_INFOPLIST_FILE = YES;
+					INFOPLIST_KEY_NSLocalNetworkUsageDescription = "ReelClaw needs local network access to connect to your editing backend during development.";
+					INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "ReelClaw needs access to save exported videos to your Photos library.";
+					INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+					INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Stuke.ReelClaw;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		962634B92F2E1A0300001C0B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 34Y8T25XFX;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Stuke.ReelClawTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ReelClaw.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ReelClaw";
+			};
+			name = Debug;
+		};
+		962634BA2F2E1A0300001C0B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 34Y8T25XFX;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Stuke.ReelClawTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ReelClaw.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ReelClaw";
+			};
+			name = Release;
+		};
+		962634BC2F2E1A0300001C0B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 34Y8T25XFX;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Stuke.ReelClawUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = ReelClaw;
+			};
+			name = Debug;
+		};
+		962634BD2F2E1A0300001C0B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 34Y8T25XFX;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Stuke.ReelClawUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = ReelClaw;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		9626348C2F2E19FF00001C0B /* Build configuration list for PBXProject "ReelClaw" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				962634B32F2E1A0300001C0B /* Debug */,
+				962634B42F2E1A0300001C0B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		962634B52F2E1A0300001C0B /* Build configuration list for PBXNativeTarget "ReelClaw" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				962634B62F2E1A0300001C0B /* Debug */,
+				962634B72F2E1A0300001C0B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		962634B82F2E1A0300001C0B /* Build configuration list for PBXNativeTarget "ReelClawTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				962634B92F2E1A0300001C0B /* Debug */,
+				962634BA2F2E1A0300001C0B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		962634BB2F2E1A0300001C0B /* Build configuration list for PBXNativeTarget "ReelClawUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				962634BC2F2E1A0300001C0B /* Debug */,
+				962634BD2F2E1A0300001C0B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 962634892F2E19FF00001C0B /* Project object */;
+}

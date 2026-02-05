@@ -1,0 +1,46 @@
+__pycache__/
+*.py[cod]
+
+.DS_Store
+
+# App build artifacts / caches
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Generated artifacts (local runs)
+Outputs/
+Inputs/*.txt
+Inputs/**/*.txt
+
+# Terraform (never commit state / local modules)
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Keep legacy/local-only folders out of the ReelClaw repo (root-only)
+/archive/
+/benchmarks/
+/docs/
+/reports/
+/scripts/
+
+.venv/
+venv/
+.env
+.env.*
+
+# Local secrets
+openrouter
+
+# Local editor/agent state
+.claude/
+
+# Optional caches/artifacts
+data/cache/
+data/raw/
+
+content/_backups/
+
+# ReelClaw backend local state
+backend/data/

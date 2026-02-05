@@ -1,0 +1,27 @@
+.git
+.github
+archive
+ios
+scripts
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+Outputs
+Inputs
+data
+content
+benchmarks/**/Outputs
+
+# Secrets
+.env
+.env.*
+openrouter
+
+# iOS build artifacts
+DerivedData
+ios/ReelClaw/**/DerivedData
+ios/ReelClaw/**/*.xcuserstate

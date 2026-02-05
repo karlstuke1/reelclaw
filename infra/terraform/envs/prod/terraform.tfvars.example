@@ -1,0 +1,8 @@
+# aws_region = "us-east-1"
+# api_image_tag = "latest"
+# worker_image_tag = "latest"
+#
+# enable_apns = false
+# apns_platform_application_arn = ""
+#
+# apple_audience = "com.your.bundleid"

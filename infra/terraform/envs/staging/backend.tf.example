@@ -1,0 +1,13 @@
+# Optional remote state backend. Copy to `backend.tf` and fill in values from
+# `infra/terraform/bootstrap` outputs.
+#
+# terraform {
+#   backend "s3" {
+#     bucket         = "REPLACE_ME"
+#     key            = "reelclaw/staging/terraform.tfstate"
+#     region         = "REPLACE_ME"
+#     dynamodb_table = "REPLACE_ME"
+#     encrypt        = true
+#   }
+# }
+

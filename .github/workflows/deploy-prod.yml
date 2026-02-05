@@ -1,0 +1,76 @@
+name: Deploy (prod)
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: reelclaw-prod-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      ENV: prod
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      API_BASE_URL: ${{ vars.API_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard (no image-gen code shipped)
+        run: |
+          set -euo pipefail
+          if grep -RIn -E "time_travel_(pipeline|director|gui|era_config|video|output)|story_pipeline" backend/reelclaw_pipeline backend/reelclaw_backend backend/Dockerfile.worker; then
+            echo "Forbidden image-gen reference found (time_travel_* / story_pipeline)."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push images
+        id: images
+        run: |
+          set -euo pipefail
+          TAG="sha-${GITHUB_SHA::7}"
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          API_IMAGE="${REGISTRY}/reelclaw-${ENV}-api:${TAG}"
+          WORKER_IMAGE="${REGISTRY}/reelclaw-${ENV}-worker:${TAG}"
+
+          docker build --platform linux/amd64 -f backend/Dockerfile.api -t "${API_IMAGE}" .
+          docker build --platform linux/amd64 -f backend/Dockerfile.worker -t "${WORKER_IMAGE}" .
+          docker push "${API_IMAGE}"
+          docker push "${WORKER_IMAGE}"
+
+          echo "api_image=${API_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "worker_image=${WORKER_IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Runtime deploy (ECS + Batch)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r backend/requirements.txt
+          python3 backend/scripts/deploy_runtime.py \
+            --env "${ENV}" \
+            --region "${AWS_REGION}" \
+            --api-image "${{ steps.images.outputs.api_image }}" \
+            --worker-image "${{ steps.images.outputs.worker_image }}"
+
+      - name: Smoke test (/healthz)
+        run: |
+          set -euo pipefail
+          curl -fsS "${API_BASE_URL%/}/healthz"
+
