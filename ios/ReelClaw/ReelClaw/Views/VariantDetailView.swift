@@ -90,7 +90,7 @@ struct VariantDetailView: View {
             Text(alertMessage)
         }
         .task {
-            player = AVPlayer(url: variant.videoURL)
+            player = AVPlayer(url: variant.videoUrl)
         }
         .onDisappear {
             player?.pause()
@@ -105,8 +105,8 @@ struct VariantDetailView: View {
         defer { isDownloading = false }
 
         do {
-            let (tempURL, _) = try await URLSession.shared.download(from: variant.videoURL)
-            let ext = variant.videoURL.pathExtension.isEmpty ? "mp4" : variant.videoURL.pathExtension
+            let (tempURL, _) = try await URLSession.shared.download(from: variant.videoUrl)
+            let ext = variant.videoUrl.pathExtension.isEmpty ? "mp4" : variant.videoUrl.pathExtension
             let dest = FileManager.default.temporaryDirectory
                 .appendingPathComponent("reelclaw-\(variant.id)")
                 .appendingPathExtension(ext)
@@ -150,15 +150,15 @@ struct VariantDetailView: View {
 struct VariantDetailView_Previews: PreviewProvider {
     static var previews: some View {
         NavigationStack {
-            VariantDetailView(
-                variant: .init(
-                    id: "v1",
-                    title: "Variation 1",
-                    score: 6.0,
-                    videoURL: URL(string: "https://example.com/video.mp4")!,
-                    thumbnailURL: nil
+                VariantDetailView(
+                    variant: .init(
+                        id: "v1",
+                        title: "Variation 1",
+                        score: 6.0,
+                        videoUrl: URL(string: "https://example.com/video.mp4")!,
+                        thumbnailUrl: nil
+                    )
                 )
-            )
+            }
         }
-    }
 }

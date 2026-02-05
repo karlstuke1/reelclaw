@@ -130,7 +130,7 @@ struct ContentView: View {
                 if isImportingClips {
                     HStack(spacing: 10) {
                         ProgressView()
-                        Text("Importing \(min(importedClipCount, importTotal))/\(importTotal)…")
+                        Text("Preparing clips \(min(importedClipCount, importTotal))/\(importTotal)…")
                             .foregroundStyle(.secondary)
                         Spacer()
                     }
@@ -152,9 +152,9 @@ struct ContentView: View {
                                 }
                             } else {
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Importing clip \(idx + 1)…")
+                                    Text("Preparing clip \(idx + 1)…")
                                         .foregroundStyle(.secondary)
-                                    Text("This can take a bit for large videos.")
+                                    Text("This step imports from Photos (not uploading yet).")
                                         .font(.footnote)
                                         .foregroundStyle(.secondary)
                                 }
@@ -198,6 +198,7 @@ struct ContentView: View {
         if let errorMessage {
             Text(errorMessage)
                 .foregroundStyle(.red)
+                .textSelection(.enabled)
         }
     }
 
@@ -433,7 +434,7 @@ struct ContentView: View {
                 guard let referenceFileURL, let refCT = referenceSpec.contentType else {
                     throw APIError.network("Missing reference upload file.")
                 }
-                try await uploadFile(to: refTarget.uploadURL, fileURL: referenceFileURL, contentType: refCT)
+                try await uploadFile(to: refTarget.uploadUrl, fileURL: referenceFileURL, contentType: refCT)
             }
 
             if job.clipUploads.count != preparedClips.count {
@@ -441,7 +442,7 @@ struct ContentView: View {
             }
             for (idx, target) in job.clipUploads.enumerated() {
                 let file = preparedClips[idx]
-                try await uploadFile(to: target.uploadURL, fileURL: file.url, contentType: file.contentType)
+                try await uploadFile(to: target.uploadUrl, fileURL: file.url, contentType: file.contentType)
             }
 
             try await api.startJob(jobId: job.jobId)

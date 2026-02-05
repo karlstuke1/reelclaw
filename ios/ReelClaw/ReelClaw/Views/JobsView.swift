@@ -30,6 +30,7 @@ struct JobsView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
+                            .textSelection(.enabled)
                         Button("Try again") {
                             Task { await load() }
                         }
@@ -44,6 +45,7 @@ struct JobsView: View {
                             Text(errorMessage)
                                 .font(.footnote)
                                 .foregroundStyle(.red)
+                                .textSelection(.enabled)
                         }
 
                         ForEach(jobs) { job in

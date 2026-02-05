@@ -45,7 +45,9 @@ struct VariantsView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 12) {
                         ForEach(variants) { variant in
-                            NavigationLink(value: variant) {
+                            NavigationLink {
+                                VariantDetailView(variant: variant)
+                            } label: {
                                 VariantCardView(variant: variant)
                             }
                             .buttonStyle(.plain)
@@ -56,9 +58,6 @@ struct VariantsView: View {
             }
         }
         .navigationTitle("Variations")
-        .navigationDestination(for: VariantsResponse.Variant.self) { variant in
-            VariantDetailView(variant: variant)
-        }
         .task {
             await load()
         }
@@ -95,7 +94,7 @@ private struct VariantCardView: View {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(Color(.secondarySystemGroupedBackground))
 
-                if let thumb = variant.thumbnailURL {
+                if let thumb = variant.thumbnailUrl {
                     AsyncImage(url: thumb) { phase in
                         switch phase {
                         case .empty:

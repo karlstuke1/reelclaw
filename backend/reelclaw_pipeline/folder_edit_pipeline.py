@@ -74,6 +74,33 @@ def _float_env(name: str, default: str) -> float:
             return 0.0
 
 
+def _default_critic_model(*, analysis_model: str, critic_model: str | None) -> str:
+    """
+    Choose a critic/judge model.
+
+    Policy:
+    - Explicit critic_model argument wins.
+    - Then CRITIC_MODEL env.
+    - Otherwise: if analysis_model looks "fast/lenient" (Flash/mini/lite), default judge to a Pro model.
+      This prevents reference-relative scoring from being too forgiving and keeps the improve loop strict.
+    - Else reuse analysis_model.
+    """
+    explicit = str(critic_model or "").strip()
+    if explicit:
+        return explicit
+
+    env = str(os.getenv("CRITIC_MODEL", "") or "").strip()
+    if env:
+        return env
+
+    am = str(analysis_model or "").strip()
+    am_l = am.lower()
+    looks_fast = any(tok in am_l for tok in ("flash", "lite", "mini"))
+    if looks_fast:
+        return str(os.getenv("CRITIC_MODEL_DEFAULT", "google/gemini-3-pro-preview") or "google/gemini-3-pro-preview").strip()
+    return am
+
+
 def _candidate_times_for_refinement(
     *,
     asset_duration_s: float | None,
@@ -173,12 +200,14 @@ def _compute_eq_grade(
 
     if abs(dl) >= luma_thresh or abs(dd) >= dark_thresh:
         # eq brightness is [-1..1] but practical, non-destructive moves are small.
-        brightness = _clamp(dl * 0.85, -0.22, 0.22)
+        # Allow slightly larger moves; many real-world libraries include mixed lighting where
+        # +/-0.22 isn't enough to approach a reference look.
+        brightness = _clamp(dl * 0.95, -0.30, 0.30)
 
         # contrast default is 1.0; keep within a subtle range.
         contrast = 1.0
         if abs(dd) >= 0.05:
-            contrast = _clamp(1.0 + (dd * 0.85), 0.85, 1.35)
+            contrast = _clamp(1.0 + (dd * 0.95), 0.75, 1.55)
 
         # If the reference is extremely dark, bias toward keeping things low-key.
         try:
@@ -211,9 +240,9 @@ def _compute_eq_grade(
             bg = float(ref_rgb[2]) / max(denom, float(out_rgb[2]))
         except Exception:
             rg, gg, bg = 1.0, 1.0, 1.0
-        rg = _clamp(rg, 0.78, 1.32)
-        gg = _clamp(gg, 0.78, 1.32)
-        bg = _clamp(bg, 0.78, 1.32)
+        rg = _clamp(rg, 0.70, 1.40)
+        gg = _clamp(gg, 0.70, 1.40)
+        bg = _clamp(bg, 0.70, 1.40)
         # Only apply if there's a meaningful shift.
         if abs(rg - 1.0) >= 0.04 or abs(gg - 1.0) >= 0.04 or abs(bg - 1.0) >= 0.04:
             grade["r_gain"] = float(rg)
@@ -1152,6 +1181,8 @@ def run_folder_edit_pipeline(
     *,
     reel_url_or_path: str,
     media_folder: Path,
+    niche: str = "",
+    vibe: str = "",
     output_base: Path,
     analysis_model: str,
     api_key: str,
@@ -1194,9 +1225,12 @@ def run_folder_edit_pipeline(
 
         output_paths = _dc.replace(output_paths, video_path=(output_paths.root / "final_video_with_captions.mov"))
     improve_iters = max(0, int(improve_iters or 0))
-    critic_model = str((critic_model or "").strip() or os.getenv("DIRECTOR_MODEL", "") or analysis_model)
+    analysis_model = str(analysis_model or "").strip()
+    critic_model = _default_critic_model(analysis_model=analysis_model, critic_model=critic_model)
     critic_max_mb = float(critic_max_mb or 8.0)
     critic_pro_mode = bool(critic_pro_mode) if critic_pro_mode is not None else bool(pro_mode)
+    niche = str(niche or "").strip() or str(os.getenv("FOLDER_EDIT_NICHE", "") or "").strip()
+    vibe = str(vibe or "").strip() or str(os.getenv("FOLDER_EDIT_VIBE", "") or "").strip() or "N/A"
 
     # Acquire reel video.
     emit("Reel", 0, 3, "Downloading reel")
@@ -1519,7 +1553,7 @@ def run_folder_edit_pipeline(
         else:
             emit("Library", 2, 3, "Building shot library")
             try:
-                from shot_index import build_or_load_shot_index
+                from .shot_index import build_or_load_shot_index
 
                 def _shot_progress(cur: int, total: int, msg: str) -> None:
                     emit("ShotIndex", cur, total, msg)
@@ -1613,8 +1647,8 @@ def run_folder_edit_pipeline(
     learned_grader_info: dict[str, t.Any] | None = None
     if pro_mode and _truthy_env("FOLDER_EDIT_LEARNED_GRADER_STEER", "1"):
         try:
-            from grader_steering import find_latest_grader_dir
-            from learned_grader import GeminiGrader
+            from .grader_steering import find_latest_grader_dir
+            from .learned_grader import GeminiGrader
 
             grader_dir_env = str(os.getenv("FOLDER_EDIT_LEARNED_GRADER_DIR", "") or "").strip()
             if grader_dir_env:
@@ -1648,9 +1682,9 @@ def run_folder_edit_pipeline(
         if not shot_index_obj:
             raise RuntimeError("pro_mode requested but shot_index_obj is missing")
 
-        from edit_optimizer import optimize_shot_sequence
-        from grader_steering import choose_beam_sequence_with_grader
-        from micro_editor import micro_edit_sequence
+        from .edit_optimizer import optimize_shot_sequence
+        from .grader_steering import choose_beam_sequence_with_grader
+        from .micro_editor import micro_edit_sequence
         from .folder_edit_planner import ReferenceSegmentPlan
 
         segments_for_edit = list(ref_analysis.segments)
@@ -1660,7 +1694,7 @@ def run_folder_edit_pipeline(
         # sequence groups across the whole library (agentic, but meta/reel-agnostic).
         if _truthy_env("FOLDER_EDIT_STORY_PLANNER", "0"):
             try:
-                from story_planner import (
+                from .story_planner import (
                     load_story_plans,
                     plan_story_plans,
                     save_story_plans,
@@ -1680,6 +1714,8 @@ def run_folder_edit_pipeline(
                         model=analysis_model,
                         segments=segments_for_edit,
                         group_summaries=group_summaries,
+                        niche=niche,
+                        vibe=vibe,
                         music_doc=music_doc,
                         timeout_s=min(timeout_s, 240.0),
                         site_url=site_url,
@@ -1898,17 +1934,34 @@ def run_folder_edit_pipeline(
                         zoom = max(zoom, _float_env("FOLDER_EDIT_STABILIZE_ZOOM", "1.08"))
                         stabilize_reason = "cv2_shake_p95"
                     else:
-                        # Fallback: legacy motion proxy.
-                        motion = None
+                        # Fallback: prefer shot_index shake_score when available; motion proxy is last resort.
+                        shake_score = None
                         if isinstance(chosen_shot, dict):
-                            motion = chosen_shot.get("motion_score")
-                        if motion is None:
-                            motion = asset_meta.get("motion_score")
-                        motion_th = _float_env("FOLDER_EDIT_STABILIZE_MOTION_THRESHOLD", "0.17")
-                        if isinstance(motion, (int, float)) and float(motion) >= float(motion_th) and float(seg.duration_s) >= 1.0:
+                            shake_score = chosen_shot.get("shake_score")
+                        if shake_score is None:
+                            shake_score = asset_meta.get("shake_score")
+                        shake_th2 = _float_env("FOLDER_EDIT_STABILIZE_SHAKE_SCORE_THRESHOLD", "0.22")
+                        shake_max2 = _float_env("FOLDER_EDIT_STABILIZE_SHAKE_SCORE_MAX", "0.60")
+                        if (
+                            isinstance(shake_score, (int, float))
+                            and float(shake_score) >= float(shake_th2)
+                            and float(shake_score) <= float(shake_max2)
+                            and float(seg.duration_s) >= 1.0
+                        ):
                             stabilize = True
                             zoom = max(zoom, _float_env("FOLDER_EDIT_STABILIZE_ZOOM", "1.08"))
-                            stabilize_reason = "motion_proxy"
+                            stabilize_reason = "shake_score"
+                        else:
+                            motion = None
+                            if isinstance(chosen_shot, dict):
+                                motion = chosen_shot.get("motion_score")
+                            if motion is None:
+                                motion = asset_meta.get("motion_score")
+                            motion_th = _float_env("FOLDER_EDIT_STABILIZE_MOTION_THRESHOLD", "0.17")
+                            if isinstance(motion, (int, float)) and float(motion) >= float(motion_th) and float(seg.duration_s) >= 1.0:
+                                stabilize = True
+                                zoom = max(zoom, _float_env("FOLDER_EDIT_STABILIZE_ZOOM", "1.08"))
+                                stabilize_reason = "motion_proxy"
 
                 # Judge-driven stabilization override (e.g., when the critic flags low stability).
                 if int(seg.id) in pro_force_stabilize_segs and asset_kind == "video":
@@ -2608,7 +2661,6 @@ def run_folder_edit_pipeline(
                 out_proxy = out_with_audio
                 ref_proxy = analysis_clip
 
-            critic_model = str(os.getenv("CRITIC_MODEL", analysis_model) or analysis_model)
             criteria = str(
                 os.getenv(
                     "FOLDER_EDIT_JUDGE_CRITERIA",
@@ -2752,7 +2804,7 @@ def run_folder_edit_pipeline(
                 recast_thr = float(_float_env("FOLDER_EDIT_JUDGE_RECAST_THR", "0.10"))
                 if stability <= float(_float_env("FOLDER_EDIT_JUDGE_STABILITY_RECAST_TH", "3.0")) or overall <= float(_float_env("FOLDER_EDIT_JUDGE_OVERALL_RECAST_TH", "5.5")):
                     try:
-                        from edit_optimizer import shortlist_shots_for_segment
+                        from .edit_optimizer import shortlist_shots_for_segment
                     except Exception:
                         shortlist_shots_for_segment = None  # type: ignore[assignment]
 
@@ -2948,7 +3000,7 @@ def run_folder_edit_pipeline(
     review_out = review_dir / "output_review.mp4"
     review_compare = review_dir / "compare_review.mp4"
     try:
-        from review_render import render_compare_video, render_labeled_review_video
+        from .review_render import render_compare_video, render_labeled_review_video
 
         segs_for_review = [{"id": sid, "start_s": s, "end_s": e} for sid, s, e in segments]
         emit("Review", 0, 1, "Rendering review proxies (REF/OUT/COMPARE)")
@@ -3120,9 +3172,9 @@ def run_folder_edit_pipeline(
 
     if improve_iters_total > 0:
         try:
-            from compare_video_critic import critique_compare_video
-            from critic_schema import severity_rank
-            from fix_actions import apply_fix_actions, apply_segment_deltas_to_timeline, apply_transition_deltas
+            from .compare_video_critic import critique_compare_video
+            from .critic_schema import severity_rank
+            from .fix_actions import apply_fix_actions, apply_segment_deltas_to_timeline, apply_transition_deltas
             import dataclasses as _dc
         except Exception as e:
             raise RuntimeError(f"Missing improve-loop dependencies: {type(e).__name__}: {e}") from e

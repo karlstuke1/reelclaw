@@ -116,6 +116,14 @@ class RegisterDeviceResponse(BaseModel):
     ok: bool
 
 
+class MetaResponse(BaseModel):
+    api_version: str
+    aws_mode: bool
+    jwt_issuer: str
+    server_time_utc: str
+    accepted_auth: list[str]
+
+
 ############################
 # Internal helpers/state
 ############################
@@ -279,6 +287,29 @@ def _startup() -> None:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/v1/meta", response_model=MetaResponse)
+def meta() -> MetaResponse:
+    """
+    Lightweight, unauthenticated metadata for client debugging.
+
+    Keep this response non-sensitive (no secrets, bucket names, table names, etc.).
+    """
+    settings = _get_settings()
+    jwt_auth = _get_jwt()
+    return MetaResponse(
+        api_version=str(app.version),
+        aws_mode=bool(_is_aws_mode(settings)),
+        jwt_issuer=str(getattr(jwt_auth, "issuer", "reelclaw")),
+        server_time_utc=_utc_now_iso(),
+        accepted_auth=[
+            "Authorization: Bearer <token>",
+            "X-Reelclaw-Token: <token>",
+            "X-Reelclaw-Authorization: Bearer <token>",
+            "Query param: ?token=<token>",
+        ],
+    )
 
 
 ############################
@@ -754,6 +785,36 @@ def get_variants(job_id: str, request: Request, user_id: str = Depends(require_u
     pipeline_root = Path(str(job.get("pipeline_root") or _get_jobs().job_dir(job_id) / "pipeline")).expanduser().resolve()
     finals_dir = pipeline_root / "finals"
 
+    # Best-effort: include a normalized (0..10) score from finals_manifest.json when present.
+    score_by_id: dict[str, float] = {}
+    try:
+        manifest = finals_dir / "finals_manifest.json"
+        if manifest.exists():
+            doc = json.loads(manifest.read_text(encoding="utf-8", errors="replace") or "{}")
+            winners = doc.get("winners") or []
+            raw: dict[str, float] = {}
+            if isinstance(winners, list):
+                for w in winners:
+                    if not isinstance(w, dict):
+                        continue
+                    fid = str(w.get("final_id") or "").strip()
+                    rs = w.get("rank_score")
+                    if fid and isinstance(rs, (int, float)):
+                        raw[fid] = float(rs)
+            if raw:
+                vals = list(raw.values())
+                lo = min(vals)
+                hi = max(vals)
+                if abs(float(hi) - float(lo)) < 1e-9:
+                    score_by_id = {k: 10.0 for k in raw.keys()}
+                else:
+                    score_by_id = {
+                        k: float(max(0.0, min(10.0, 10.0 * ((float(v) - float(lo)) / (float(hi) - float(lo))))))
+                        for k, v in raw.items()
+                    }
+    except Exception:
+        score_by_id = {}
+
     variants: list[dict[str, Any]] = []
     for p in sorted(finals_dir.glob("v*.mov")) + sorted(finals_dir.glob("v*.mp4")):
         vid = p.stem
@@ -762,7 +823,7 @@ def get_variants(job_id: str, request: Request, user_id: str = Depends(require_u
             {
                 "id": vid,
                 "title": f"Variation {vid.lstrip('v')}",
-                "score": None,
+                "score": score_by_id.get(vid),
                 "video_url": str(video_url),
                 "thumbnail_url": None,
             }

@@ -17,11 +17,57 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _truthy_env(name: str, default: str = "0") -> bool:
+    raw = os.getenv(name, default).strip().lower()
+    return raw not in {"0", "false", "no", "off", ""}
+
+
+def _apply_pro_defaults(env: dict[str, str]) -> None:
+    """
+    Keep iOS/prod pipeline in line with the legacy pro-mode scripts by turning on the
+    higher-quality "editor brain" knobs, but without overriding explicit env.
+    """
+    env.setdefault("FOLDER_EDIT_BEAT_SYNC", "1")
+    env.setdefault("FOLDER_EDIT_STORY_PLANNER", "1")
+    env.setdefault("SHOT_INDEX_MODE", "scene")
+    env.setdefault("SHOT_INDEX_WORKERS", "4")
+    env.setdefault("SHOT_TAGGING", "1")
+    # Local default: keep tagging bounded to avoid the appearance of "hanging" on big libraries.
+    env.setdefault("SHOT_TAG_MAX", "400")
+    env.setdefault("REF_SEGMENT_FRAME_COUNT", "3")
+    env.setdefault("REASONING_EFFORT", "high")
+    # Directed quality lift: generate more internal candidates, fix worst segments on finalists.
+    env.setdefault("VARIANT_FIX_ITERS", "1")
+    env.setdefault("VARIANT_PRO_MACRO", "beam")
+
+
 def _count_variants(finals_dir: Path) -> int:
     try:
         return len(list(finals_dir.glob("v*.mov"))) + len(list(finals_dir.glob("v*.mp4")))
     except Exception:
         return 0
+
+
+def _count_candidates(variants_dir: Path) -> int:
+    """
+    Count candidate renders in variants/ (independent of finals selection/copying).
+    """
+    try:
+        return len(list(variants_dir.glob("v*/final_video.mov")))
+    except Exception:
+        return 0
+
+
+def _internal_variant_count(*, finals: int, pro_mode: bool) -> int:
+    raw = os.getenv("REELCLAW_INTERNAL_VARIANTS", "").strip()
+    try:
+        configured = int(float(raw)) if raw else 0
+    except Exception:
+        configured = 0
+    if configured > 0:
+        return max(int(finals), int(configured))
+    # Default: keep old behavior unless pro mode is enabled.
+    return max(int(finals), 16) if pro_mode else int(finals)
 
 
 @dataclass
@@ -57,6 +103,8 @@ class JobRunner:
 
         variations = int(job.get("variations") or 3)
         burn_overlays = bool(job.get("burn_overlays") or False)
+        pro_mode = _truthy_env("REELCLAW_PRO_MODE", "1")
+        internal_variants = _internal_variant_count(finals=variations, pro_mode=pro_mode)
 
         job_dir = self.jobs.job_dir(job_id)
         uploads_dir = job_dir / "uploads"
@@ -65,6 +113,7 @@ class JobRunner:
 
         log_path = pipeline_root / f"job_{job_id}_{_now_ms()}.log"
         finals_dir = pipeline_root / "finals"
+        variants_dir = pipeline_root / "variants"
         backend_root = Path(__file__).resolve().parents[1]
 
         try:
@@ -102,6 +151,8 @@ class JobRunner:
                 "--folder",
                 str(uploads_dir),
                 "--variants",
+                str(internal_variants),
+                "--finals",
                 str(variations),
                 "--out",
                 str(pipeline_root),
@@ -110,11 +161,15 @@ class JobRunner:
                 "--model",
                 self.settings.director_model,
             ]
+            if pro_mode:
+                cmd.append("--pro")
             if burn_overlays:
                 cmd.append("--burn-overlays")
 
             env = os.environ.copy()
             env["PYTHONPATH"] = str(backend_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+            if pro_mode:
+                _apply_pro_defaults(env)
             # Allow using the full reel length (no -t) by setting this to 0.
             if self.settings.reference_analysis_max_seconds is None:
                 env["REEL_ANALYSIS_MAX_SECONDS"] = "0"
@@ -135,15 +190,21 @@ class JobRunner:
 
                 last_progress = -1
                 while proc.poll() is None:
-                    cur = _count_variants(finals_dir)
+                    cur = _count_candidates(variants_dir)
                     if cur != last_progress:
                         last_progress = cur
+                        # Scale candidate progress to the number of finals the user requested.
+                        scaled = 0
+                        try:
+                            scaled = int(round((float(cur) / max(1.0, float(internal_variants))) * float(variations)))
+                        except Exception:
+                            scaled = 0
                         self.jobs.update(
                             job_id,
                             status="running",
-                            stage=f"Rendering variations ({min(cur, variations)}/{variations})",
+                            stage=f"Exploring candidates ({min(cur, internal_variants)}/{internal_variants})",
                             message="This can take a few minutes depending on clip length.",
-                            progress_current=min(cur, variations),
+                            progress_current=min(max(0, scaled), variations),
                             progress_total=max(1, variations),
                         )
                     time.sleep(1.0)

@@ -14,7 +14,11 @@ This is a FastAPI API + a Batch worker wrapper around the reel replication pipel
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r backend/requirements.txt
+# API-only deps:
+# pip install -r backend/requirements.txt
+#
+# Full pipeline deps (recommended for local E2E editing; includes Pillow/numpy/sklearn/joblib):
+pip install -r backend/requirements.worker.txt
 ```
 
 ## Run

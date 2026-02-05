@@ -22,15 +22,9 @@ class OpenRouterChatResult:
 
 def normalize_model(model: str) -> str:
     """
-    Enforce repo policy: never call Gemini 3 Flash (too unreliable for our grading loop).
+    Normalize a model id string (trim). Model routing policy lives at call sites.
     """
-    m = str(model or "").strip()
-    if not m:
-        return m
-    lower = m.lower()
-    if "google/gemini-3-flash" in lower:
-        return "google/gemini-3-pro-preview"
-    return m
+    return str(model or "").strip()
 
 
 def _extract_message(response_json: dict[str, t.Any]) -> dict[str, t.Any]:
@@ -126,6 +120,8 @@ def chat_completions(
         "messages": messages,
         "temperature": temperature,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
     if modalities:
         payload["modalities"] = modalities
     if reasoning is not None:

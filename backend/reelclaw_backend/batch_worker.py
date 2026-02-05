@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import boto3
+from botocore.config import Config
 
 from reelclaw_backend.aws_services import sns_publish_apns
 from reelclaw_backend.aws_store import DynamoDeviceStore, DynamoJobStore
@@ -42,11 +45,86 @@ def _safe_slug(s: str) -> str:
     return "".join(out)[:120] or "file"
 
 
+def _s3_io_workers(task_count: int) -> int:
+    if task_count <= 1:
+        return 1
+    raw = (_env("REELCLAW_S3_MAX_WORKERS") or "").strip()
+    try:
+        configured = int(float(raw)) if raw else 4
+    except Exception:
+        configured = 4
+    return max(1, min(configured, 16, task_count))
+
+
+def _unique_filenames(names: list[str]) -> list[str]:
+    used: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        safe = _safe_slug(name)
+        if safe not in used:
+            used.add(safe)
+            out.append(safe)
+            continue
+        p = Path(safe)
+        stem = p.stem or "file"
+        suffix = p.suffix
+        n = 2
+        while True:
+            cand = f"{stem}_{n}{suffix}"
+            if cand not in used:
+                used.add(cand)
+                out.append(cand)
+                break
+            n += 1
+    return out
+
+
 def _count_variants(finals_dir: Path) -> int:
     try:
         return len(list(finals_dir.glob("v*.mov"))) + len(list(finals_dir.glob("v*.mp4")))
     except Exception:
         return 0
+
+
+def _apply_pro_defaults(env: dict[str, str]) -> None:
+    """
+    Keep iOS/prod pipeline in line with the legacy pro-mode scripts by turning on the
+    higher-quality "editor brain" knobs, but without overriding explicit env.
+    """
+    env.setdefault("FOLDER_EDIT_BEAT_SYNC", "1")
+    env.setdefault("FOLDER_EDIT_STORY_PLANNER", "1")
+    env.setdefault("SHOT_INDEX_MODE", "scene")
+    env.setdefault("SHOT_INDEX_WORKERS", "4")
+    env.setdefault("SHOT_TAGGING", "1")
+    # AWS default can be higher; keep bounded unless explicitly overridden.
+    env.setdefault("SHOT_TAG_MAX", "800")
+    env.setdefault("REF_SEGMENT_FRAME_COUNT", "3")
+    env.setdefault("REASONING_EFFORT", "high")
+    # Directed quality lift: generate more internal candidates, fix worst segments on finalists.
+    env.setdefault("VARIANT_FIX_ITERS", "1")
+    env.setdefault("VARIANT_PRO_MACRO", "beam")
+
+
+def _count_candidates(variants_dir: Path) -> int:
+    """
+    Count candidate renders in variants/ (independent of finals selection/copying).
+    """
+    try:
+        return len(list(variants_dir.glob("v*/final_video.mov")))
+    except Exception:
+        return 0
+
+
+def _internal_variant_count(*, finals: int, pro_mode: bool) -> int:
+    raw = (_env("REELCLAW_INTERNAL_VARIANTS") or "").strip()
+    try:
+        configured = int(float(raw)) if raw else 0
+    except Exception:
+        configured = 0
+    if configured > 0:
+        return max(int(finals), int(configured))
+    # Default: keep old behavior unless pro mode is enabled.
+    return max(int(finals), 16) if pro_mode else int(finals)
 
 
 def _ffmpeg_thumb(video_path: Path, out_path: Path) -> None:
@@ -79,6 +157,45 @@ def _tail_text(path: Path, *, max_chars: int = 2400) -> str:
     if len(raw) <= max_chars:
         return raw
     return raw[-max_chars:]
+
+
+def _load_final_scores(finals_dir: Path) -> dict[str, float]:
+    """
+    Best-effort: load finals_manifest.json and produce a per-final normalized score (0..10).
+    This is UI-friendly (higher is better) and stable within a job.
+    """
+    manifest = finals_dir / "finals_manifest.json"
+    if not manifest.exists():
+        return {}
+    try:
+        doc = json.loads(manifest.read_text(encoding="utf-8", errors="replace") or "{}")
+    except Exception:
+        return {}
+    winners = doc.get("winners") or []
+    raw_scores: dict[str, float] = {}
+    if isinstance(winners, list):
+        for w in winners:
+            if not isinstance(w, dict):
+                continue
+            fid = str(w.get("final_id") or "").strip()
+            rs = w.get("rank_score")
+            if not fid or not isinstance(rs, (int, float)):
+                continue
+            raw_scores[fid] = float(rs)
+
+    if not raw_scores:
+        return {}
+    vals = list(raw_scores.values())
+    lo = min(vals)
+    hi = max(vals)
+    out: dict[str, float] = {}
+    if abs(float(hi) - float(lo)) < 1e-9:
+        for k in raw_scores.keys():
+            out[k] = 10.0
+        return out
+    for k, v in raw_scores.items():
+        out[k] = float(max(0.0, min(10.0, 10.0 * ((float(v) - float(lo)) / (float(hi) - float(lo))))))
+    return out
 
 
 @dataclass(frozen=True)
@@ -142,7 +259,7 @@ def main() -> int:
     env = _load_env()
     jobs = DynamoJobStore(table_name=env.jobs_table, region=env.region)
     devices = DynamoDeviceStore(table_name=env.devices_table, region=env.region)
-    s3 = boto3.client("s3", region_name=env.region)
+    s3 = boto3.client("s3", region_name=env.region, config=Config(max_pool_connections=64))
 
     job = jobs.get(env.job_id)
     if not job:
@@ -154,6 +271,8 @@ def main() -> int:
 
     variations = max(1, int(job.get("variations") or 3))
     burn_overlays = bool(job.get("burn_overlays") or False)
+    pro_mode = _truthy_env("REELCLAW_PRO_MODE", "1")
+    internal_variants = _internal_variant_count(finals=variations, pro_mode=pro_mode)
 
     reference = job.get("reference") if isinstance(job.get("reference"), dict) else {}
     clips = job.get("clips") if isinstance(job.get("clips"), list) else []
@@ -163,6 +282,7 @@ def main() -> int:
     uploads_dir = job_root / "uploads"
     out_dir = job_root / "pipeline"
     finals_dir = out_dir / "finals"
+    variants_dir = out_dir / "variants"
     logs_dir = job_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_path = logs_dir / "worker.log"
@@ -181,6 +301,8 @@ def main() -> int:
 
     # Download clips by their recorded S3 keys.
     uploads_dir.mkdir(parents=True, exist_ok=True)
+    clip_keys: list[str] = []
+    clip_filenames: list[str] = []
     for c in clips:
         if not isinstance(c, dict):
             continue
@@ -188,11 +310,17 @@ def main() -> int:
         if not key:
             raise RuntimeError("Clip missing s3_key")
         filename = str(c.get("filename") or Path(key).name)
-        dst = uploads_dir / _safe_slug(filename)
-        s3.download_file(env.uploads_bucket, key, str(dst))
+        clip_keys.append(key)
+        clip_filenames.append(filename)
 
-    # Acquire reference input.
+    clip_dst_filenames = _unique_filenames(clip_filenames)
+    clip_tasks: list[tuple[str, Path]] = [
+        (key, uploads_dir / dst_name) for key, dst_name in zip(clip_keys, clip_dst_filenames)
+    ]
+
+    # Acquire reference input (can download in parallel with clips).
     reel_arg = ""
+    ref_task: tuple[str, Path] | None = None
     if str(reference.get("type") or "") == "url":
         reel_arg = str(reference.get("url") or "").strip()
     elif str(reference.get("type") or "") == "upload":
@@ -203,13 +331,28 @@ def main() -> int:
         ref_dir.mkdir(parents=True, exist_ok=True)
         filename = str(reference.get("filename") or Path(rkey).name or "reference.mp4")
         ref_path = ref_dir / _safe_slug(filename)
-        s3.download_file(env.uploads_bucket, rkey, str(ref_path))
+        ref_task = (rkey, ref_path)
         reel_arg = str(ref_path)
     else:
         raise RuntimeError("Invalid reference type")
 
     if not reel_arg:
         raise RuntimeError("Missing reference reel input")
+
+    def _download_one(key: str, dst: Path) -> None:
+        s3.download_file(env.uploads_bucket, key, str(dst))
+
+    download_tasks = clip_tasks + ([ref_task] if ref_task else [])
+    if download_tasks:
+        workers = _s3_io_workers(len(download_tasks))
+        if workers <= 1:
+            for key, dst in download_tasks:
+                _download_one(key, dst)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_download_one, key, dst) for key, dst in download_tasks]
+                for fut in as_completed(futures):
+                    fut.result()
 
     _update_job(
         jobs,
@@ -232,6 +375,8 @@ def main() -> int:
         "--folder",
         str(uploads_dir),
         "--variants",
+        str(internal_variants),
+        "--finals",
         str(variations),
         "--out",
         str(out_dir),
@@ -242,11 +387,15 @@ def main() -> int:
         "--timeout",
         "240",
     ]
+    if pro_mode:
+        cmd.append("--pro")
     if burn_overlays:
         cmd.append("--burn-overlays")
 
     run_env = os.environ.copy()
     run_env["PYTHONPATH"] = str(backend_root) + (os.pathsep + run_env["PYTHONPATH"] if run_env.get("PYTHONPATH") else "")
+    if pro_mode:
+        _apply_pro_defaults(run_env)
     if env.reference_analysis_max_seconds is None:
         run_env["REEL_ANALYSIS_MAX_SECONDS"] = "0"
     else:
@@ -265,16 +414,21 @@ def main() -> int:
 
         last = -1
         while proc.poll() is None:
-            cur = _count_variants(finals_dir)
+            cur = _count_candidates(variants_dir)
             if cur != last:
                 last = cur
+                scaled = 0
+                try:
+                    scaled = int(round((float(cur) / max(1.0, float(internal_variants))) * float(variations)))
+                except Exception:
+                    scaled = 0
                 _update_job(
                     jobs,
                     env.job_id,
                     status="running",
-                    stage=f"Rendering variations ({min(cur, variations)}/{variations})",
+                    stage=f"Exploring candidates ({min(cur, internal_variants)}/{internal_variants})",
                     message="This can take a few minutes depending on clip length.",
-                    progress_current=min(cur, variations),
+                    progress_current=min(max(0, scaled), variations),
                     progress_total=variations,
                 )
             time.sleep(1.5)
@@ -326,27 +480,48 @@ def main() -> int:
     )
 
     # Upload finals + thumbs.
-    variants: list[dict[str, Any]] = []
+    final_files = sorted(finals_dir.glob("v*.mov")) + sorted(finals_dir.glob("v*.mp4"))
     thumbs_dir = job_root / "thumbs"
-    for p in sorted(finals_dir.glob("v*.mov")) + sorted(finals_dir.glob("v*.mp4")):
-        vid = p.stem
+    score_by_id = _load_final_scores(finals_dir)
+
+    def _upload_variant(p: Path) -> tuple[str, str, str | None]:
         video_key = f"outputs/{user_id}/{env.job_id}/finals/{p.name}"
         s3.upload_file(str(p), env.outputs_bucket, video_key)
 
         thumb_key: str | None = None
         try:
-            thumb_path = thumbs_dir / f"{vid}.jpg"
+            thumb_path = thumbs_dir / f"{p.stem}.jpg"
             _ffmpeg_thumb(p, thumb_path)
             thumb_key = f"outputs/{user_id}/{env.job_id}/thumbs/{thumb_path.name}"
             s3.upload_file(str(thumb_path), env.outputs_bucket, thumb_key)
         except Exception:
             thumb_key = None
 
+        return p.name, video_key, thumb_key
+
+    upload_results: dict[str, tuple[str, str | None]] = {}
+    if final_files:
+        workers = _s3_io_workers(len(final_files))
+        if workers <= 1:
+            for p in final_files:
+                name, video_key, thumb_key = _upload_variant(p)
+                upload_results[name] = (video_key, thumb_key)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_upload_variant, p) for p in final_files]
+                for fut in as_completed(futures):
+                    name, video_key, thumb_key = fut.result()
+                    upload_results[name] = (video_key, thumb_key)
+
+    variants: list[dict[str, Any]] = []
+    for p in final_files:
+        video_key, thumb_key = upload_results[p.name]
+        vid = p.stem
         variants.append(
             {
                 "id": vid,
                 "title": f"Variation {vid.lstrip('v')}",
-                "score": None,
+                "score": score_by_id.get(vid),
                 "video_s3_key": video_key,
                 "thumb_s3_key": thumb_key,
             }

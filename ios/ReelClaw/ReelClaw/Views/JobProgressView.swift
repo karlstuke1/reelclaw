@@ -22,6 +22,7 @@ struct JobProgressView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
                 if let errorDetail, !errorDetail.isEmpty {
                     Button("Show details") { showErrorDetails = true }
                         .buttonStyle(.bordered)
@@ -55,7 +56,7 @@ struct JobProgressView: View {
                     .padding(.top, 8)
 
                 if status?.status == .succeeded {
-                    Button("View 3 variations") {
+                    Button(variantsButtonTitle) {
                         showVariants = true
                     }
                     .buttonStyle(.borderedProminent)
@@ -118,6 +119,12 @@ struct JobProgressView: View {
     private var progressValue: Double {
         guard let cur = status?.progressCurrent, cur >= 0 else { return 0 }
         return Double(cur)
+    }
+
+    private var variantsButtonTitle: String {
+        let total = status?.progressTotal ?? 0
+        let n = max(1, total)
+        return n == 1 ? "View variation" : "View \(n) variations"
     }
 
     private func poll() async {

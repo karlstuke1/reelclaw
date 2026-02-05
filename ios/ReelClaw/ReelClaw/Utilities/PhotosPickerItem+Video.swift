@@ -53,7 +53,13 @@ private struct ImportedVideo: Transferable {
                     .appendingPathComponent(stem + "-" + UUID().uuidString)
                     .appendingPathExtension(ext)
             }
-            try FileManager.default.copyItem(at: received.file, to: dst)
+            do {
+                // Fast path: moving within the same volume is usually O(1).
+                try FileManager.default.moveItem(at: received.file, to: dst)
+            } catch {
+                // Fallback: Photos may provide a file that can't be moved (permissions / different volume).
+                try FileManager.default.copyItem(at: received.file, to: dst)
+            }
             return ImportedVideo(url: dst)
         }
     }

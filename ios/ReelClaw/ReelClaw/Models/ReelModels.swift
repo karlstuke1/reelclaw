@@ -28,13 +28,13 @@ struct CreateJobRequest: Encodable {
 
 struct UploadTarget: Decodable, Hashable {
     let s3Key: String?
-    let uploadURL: URL
+    let uploadUrl: URL
 }
 
 struct ClipUploadTarget: Decodable, Hashable {
     let clipId: String
     let s3Key: String?
-    let uploadURL: URL
+    let uploadUrl: URL
 }
 
 struct CreateJobResponse: Decodable {
@@ -89,8 +89,8 @@ struct VariantsResponse: Decodable {
         let id: String
         let title: String?
         let score: Double?
-        let videoURL: URL
-        let thumbnailURL: URL?
+        let videoUrl: URL
+        let thumbnailUrl: URL?
     }
 }
 
