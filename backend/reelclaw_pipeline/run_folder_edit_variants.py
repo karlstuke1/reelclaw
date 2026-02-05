@@ -2045,6 +2045,87 @@ def main() -> int:
     director_mode = str(getattr(args, "director", "code") or "code").strip().lower()
     fix_iters = max(0, int(getattr(args, "fix_iters", 0) or 0))
 
+    # Optional: learned grader predictions (used as a small tie-breaker/steering signal).
+    learned_grader = None
+    learned_grader_info: dict[str, t.Any] | None = None
+    if pro_mode and shot_by_id and _truthy_env("VARIANT_LEARNED_GRADER", "1"):
+        try:
+            from .grader_steering import find_latest_grader_dir, fast_features_for_sequence
+            from .learned_grader import GeminiGrader
+
+            grader_dir_env = str(os.getenv("VARIANT_LEARNED_GRADER_DIR", "") or os.getenv("FOLDER_EDIT_LEARNED_GRADER_DIR", "") or "").strip()
+            grader_dir: Path | None = None
+            if grader_dir_env:
+                grader_dir = Path(grader_dir_env).expanduser().resolve()
+            else:
+                # Prefer searching next to the project when it lives under Outputs/.
+                search_root = project_root.parent if project_root.parent.exists() else Path("Outputs")
+                grader_dir = find_latest_grader_dir(search_root) or find_latest_grader_dir(Path("Outputs"))
+
+            if grader_dir and grader_dir.exists():
+                learned_grader = GeminiGrader.load(grader_dir)
+                learned_grader_info = {"ok": True, "grader_dir": str(grader_dir)}
+        except Exception as e:
+            learned_grader = None
+            learned_grader_info = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    if learned_grader is not None:
+        try:
+            # Build plan-specific segment lists (semantic features depend on desired_tags/story fields).
+            segments_by_plan_id: dict[str, list[t.Any]] = {"default": list(ref_analysis.segments)}
+            for pid, segs0 in (story_segments_by_plan or {}).items():
+                segments_by_plan_id[str(pid)] = list(segs0 or [])
+
+            preds: dict[str, dict[str, float]] = {}
+            for vid in vids:
+                try:
+                    doc = json.loads((variants_dir / vid / "timeline.json").read_text(encoding="utf-8", errors="replace") or "{}")
+                except Exception:
+                    continue
+                seg_rows = doc.get("timeline_segments") if isinstance(doc.get("timeline_segments"), list) else []
+                if not isinstance(seg_rows, list) or not seg_rows:
+                    continue
+
+                plan_id0 = str(doc.get("story_plan_id") or "").strip() or "default"
+                seg_objs = segments_by_plan_id.get(plan_id0) or segments_by_plan_id.get("default") or []
+                shot_ids0 = [str(r.get("shot_id") or "").strip() for r in seg_rows if isinstance(r, dict)]
+                if not shot_ids0 or len(shot_ids0) != len(seg_objs):
+                    continue
+                seq: list[dict[str, t.Any]] = []
+                ok = True
+                for sid in shot_ids0:
+                    sh = shot_by_id.get(sid)
+                    if not isinstance(sh, dict):
+                        ok = False
+                        break
+                    seq.append(sh)
+                if not ok:
+                    continue
+
+                speeds = [float(r.get("speed") or 1.0) for r in seg_rows if isinstance(r, dict) and isinstance(r.get("speed"), (int, float))]
+                zooms = [float(r.get("zoom") or 1.0) for r in seg_rows if isinstance(r, dict) and isinstance(r.get("zoom"), (int, float))]
+                default_speed = float(sum(speeds) / len(speeds)) if speeds else 1.0
+                default_zoom = float(sum(zooms) / len(zooms)) if zooms else float(_float_env("FOLDER_EDIT_ZOOM", "1.0"))
+
+                feats = fast_features_for_sequence(
+                    segments=seg_objs,
+                    shots=seq,
+                    default_speed=default_speed,
+                    default_zoom=default_zoom,
+                    stabilize_enabled=_truthy_env("FOLDER_EDIT_STABILIZE", "1"),
+                    stabilize_shake_th=_float_env("FOLDER_EDIT_STEER_STABILIZE_SHAKE_TH", "0.25"),
+                )
+                pred = learned_grader.predict(feats)
+                preds[str(vid)] = pred
+                try:
+                    variant_meta[vid]["learned_pred"] = pred
+                except Exception:
+                    pass
+
+            write_json(project_root / "learned_grader_predictions.json", {"schema_version": 1, "grader": learned_grader_info, "preds": preds})
+        except Exception:
+            pass
+
     # Score function: deterministic composite that favors reference match + stability + look continuity.
     def _rank_score(m: dict[str, t.Any]) -> float:
         dl0 = _safe_float(m.get("avg_abs_luma_diff")) or 0.0
@@ -2069,6 +2150,16 @@ def main() -> int:
         # Penalize big palette jumps (proxy for look inconsistency).
         if pal0 is not None:
             score -= float(pal0) * 0.65
+
+        # Learned grader (if present): light tie-breaker toward predicted publishability and stability.
+        pred = m.get("learned_pred") if isinstance(m.get("learned_pred"), dict) else None
+        if isinstance(pred, dict):
+            po = _safe_float(pred.get("overall_score"))
+            ps = _safe_float(pred.get("stability"))
+            if po is not None:
+                score += (float(po) / 10.0) * float(_float_env("RANK_LEARNED_OVERALL_W", "0.12"))
+            if ps is not None:
+                score += (float(ps) / 5.0) * float(_float_env("RANK_LEARNED_STABILITY_W", "0.06"))
         return float(score)
 
     ranked_vids = sorted(vids, key=lambda vid: _rank_score(variant_meta.get(vid, {})), reverse=True)
