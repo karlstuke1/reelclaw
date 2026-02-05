@@ -74,6 +74,13 @@ struct VariantsView: View {
             let resp = try await api.getVariants(jobId: jobId)
             variants = resp.variants
         } catch {
+            if let apiError = error as? APIError,
+               case let .server(code, _) = apiError,
+               code == 401
+            {
+                session.signOut(reason: "Session expired. Please sign in again.")
+                return
+            }
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }

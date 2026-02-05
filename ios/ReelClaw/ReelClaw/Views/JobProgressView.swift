@@ -140,6 +140,13 @@ struct JobProgressView: View {
                     return
                 }
             } catch {
+                if let apiError = error as? APIError,
+                   case let .server(code, _) = apiError,
+                   code == 401
+                {
+                    session.signOut(reason: "Session expired. Please sign in again.")
+                    return
+                }
                 errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 return
             }

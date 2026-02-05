@@ -38,6 +38,12 @@ final class SessionStore: ObservableObject {
         signInError = nil
     }
 
+    func signOut(reason: String?) {
+        KeychainStore.delete(key: KeychainStore.Keys.accessToken)
+        accessToken = nil
+        signInError = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     func handleAppleSignIn(result: Result<ASAuthorization, Error>) async {
         switch result {
         case .failure(let error):
