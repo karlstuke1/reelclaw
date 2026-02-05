@@ -17,6 +17,22 @@ enum VideoImportError: LocalizedError {
     }
 }
 
+private func _safeFilenameComponent(_ s: String) -> String {
+    let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty { return "" }
+    var out: [Character] = []
+    out.reserveCapacity(trimmed.count)
+    for ch in trimmed {
+        if ch.isLetter || ch.isNumber || ch == "-" || ch == "_" || ch == " " {
+            out.append(ch)
+        } else {
+            out.append("_")
+        }
+        if out.count >= 80 { break }
+    }
+    return String(out).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 private struct ImportedVideo: Transferable {
     let url: URL
 
@@ -25,15 +41,20 @@ private struct ImportedVideo: Transferable {
             SentTransferredFile(video.url)
         } importing: { received in
             let ext = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
+            let baseName = _safeFilenameComponent(received.file.deletingPathExtension().lastPathComponent)
+            let stem = baseName.isEmpty ? UUID().uuidString : baseName
             let tmp = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
+                .appendingPathComponent(stem)
                 .appendingPathExtension(ext)
 
-            if FileManager.default.fileExists(atPath: tmp.path) {
-                try FileManager.default.removeItem(at: tmp)
+            var dst = tmp
+            if FileManager.default.fileExists(atPath: dst.path) {
+                dst = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(stem + "-" + UUID().uuidString)
+                    .appendingPathExtension(ext)
             }
-            try FileManager.default.copyItem(at: received.file, to: tmp)
-            return ImportedVideo(url: tmp)
+            try FileManager.default.copyItem(at: received.file, to: dst)
+            return ImportedVideo(url: dst)
         }
     }
 }

@@ -15,14 +15,18 @@ struct PickedClip: Identifiable, Hashable {
     }
 
     static func from(fileURL: URL) async throws -> PickedClip {
+        try await from(fileURL: fileURL, id: UUID(), filename: fileURL.lastPathComponent)
+    }
+
+    static func from(fileURL: URL, id: UUID, filename: String) async throws -> PickedClip {
         let asset = AVURLAsset(url: fileURL)
         let duration = try await asset.load(.duration)
         let seconds = max(0.0, CMTimeGetSeconds(duration))
 
         return PickedClip(
-            id: UUID(),
+            id: id,
             url: fileURL,
-            filename: fileURL.lastPathComponent,
+            filename: filename,
             durationSeconds: seconds.isFinite ? seconds : 0.0
         )
     }

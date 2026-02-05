@@ -30,6 +30,8 @@ struct ContentView: View {
 
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var clipSlots: [PickedClip?] = []
+    @State private var hasUserPickedClips: Bool = false
+    @State private var didRestoreDraftClips: Bool = false
 
     @State private var isImportingClips: Bool = false
     @State private var importedClipCount: Int = 0
@@ -64,6 +66,9 @@ struct ContentView: View {
         }
         .task(id: referencePickerItem) {
             await loadReferenceItem()
+        }
+        .task {
+            await restoreDraftClipsIfNeeded()
         }
     }
 
@@ -158,8 +163,10 @@ struct ContentView: View {
                         }
                     }
                     Button("Clear clips", role: .destructive) {
+                        ClipDraftStore.clear()
                         clipSlots = []
                         pickerItems = []
+                        hasUserPickedClips = false
                         isImportingClips = false
                         importedClipCount = 0
                         importTotal = 0
@@ -212,25 +219,44 @@ struct ContentView: View {
         .disabled(isSubmitting || isImportingClips || readyClips.isEmpty)
     }
 
-    private func loadPickerItems() async {
-        let items = pickerItems
-        if items.isEmpty {
-            clipSlots = []
+	    private func loadPickerItems() async {
+	        let items = pickerItems
+	        if items.isEmpty {
             isImportingClips = false
             importedClipCount = 0
             importTotal = 0
+
+            // If the user explicitly cleared via the picker UI (not just initial launch),
+            // treat that as a "clear selection" event and wipe the persisted draft.
+            if hasUserPickedClips {
+                ClipDraftStore.clear()
+                clipSlots = []
+                hasUserPickedClips = false
+            }
             return
         }
 
+        hasUserPickedClips = true
         errorMessage = nil
         isImportingClips = true
         importedClipCount = 0
         importTotal = items.count
-        clipSlots = Array(repeating: nil, count: items.count)
+	        clipSlots = Array(repeating: nil, count: items.count)
 
-        do {
-            let maxConcurrent = 3
-            try await withThrowingTaskGroup(of: (Int, PickedClip).self) { group in
+	        var importSession: ClipDraftStore.ImportSession?
+	        var didCommitImportSession = false
+	        do {
+	            let newImportSession = try ClipDraftStore.beginImportSession()
+	            importSession = newImportSession
+	            var records: [ClipDraftStore.DraftClip?] = Array(repeating: nil, count: items.count)
+
+	            let maxConcurrent = 3
+	            struct Imported: Sendable {
+                let index: Int
+                let clip: PickedClip
+                let record: ClipDraftStore.DraftClip
+            }
+            try await withThrowingTaskGroup(of: Imported.self) { group in
                 var nextIndex = 0
 
                 func addNext() {
@@ -238,12 +264,25 @@ struct ContentView: View {
                     let idx = nextIndex
                     let item = items[idx]
                     nextIndex += 1
-                    group.addTask {
-                        try Task.checkCancellation()
-                        let url = try await item.loadVideoToTemporaryURL()
-                        try Task.checkCancellation()
-                        let clip = try await PickedClip.from(fileURL: url)
-                        return (idx, clip)
+	                    group.addTask {
+	                        try Task.checkCancellation()
+	                        let url = try await item.loadVideoToTemporaryURL()
+	                        try Task.checkCancellation()
+
+	                        let displayName = url.lastPathComponent
+	                        let clipId = UUID()
+	                        let storedFilename = ClipDraftStore.makeStoredFilename(id: clipId, sourceExtension: url.pathExtension)
+	                        let tmpDst = newImportSession.tmpClipsDir.appendingPathComponent(storedFilename)
+	                        try ClipDraftStore.moveImportedFile(from: url, to: tmpDst)
+
+	                        let clip = try await PickedClip.from(fileURL: tmpDst, id: clipId, filename: displayName)
+	                        let record = ClipDraftStore.DraftClip(
+	                            id: clipId,
+	                            relativePath: "clips/\(storedFilename)",
+                            displayName: displayName,
+                            durationSeconds: clip.durationSeconds
+                        )
+                        return Imported(index: idx, clip: clip, record: record)
                     }
                 }
 
@@ -251,19 +290,68 @@ struct ContentView: View {
                     addNext()
                 }
 
-                while let (idx, clip) = try await group.next() {
-                    clipSlots[idx] = clip
+                while let imported = try await group.next() {
+                    clipSlots[imported.index] = imported.clip
+                    records[imported.index] = imported.record
                     importedClipCount += 1
                     addNext()
-                }
+	                }
+	            }
+
+	            let committed = records.compactMap { $0 }
+	            if committed.count != items.count {
+	                throw VideoImportError.copyFailed
+	            }
+
+	            try ClipDraftStore.commitImportSession(newImportSession, clips: committed)
+	            didCommitImportSession = true
+
+	            // Swap the UI to the committed (stable) file URLs.
+	            var restored: [PickedClip] = []
+	            restored.reserveCapacity(committed.count)
+            for rec in committed {
+                guard let url = ClipDraftStore.fileURL(for: rec) else { continue }
+                restored.append(
+                    PickedClip(
+                        id: rec.id,
+                        url: url,
+                        filename: rec.displayName,
+                        durationSeconds: rec.durationSeconds
+                    )
+                )
             }
-            isImportingClips = false
-        } catch is CancellationError {
-            // Selection changed; SwiftUI cancels the previous task.
-            isImportingClips = false
-        } catch {
-            isImportingClips = false
-            errorMessage = error.localizedDescription
+	            clipSlots = restored.map { Optional.some($0) }
+	            isImportingClips = false
+	        } catch is CancellationError {
+	            if let importSession, !didCommitImportSession {
+	                ClipDraftStore.discardImportSession(importSession)
+	            }
+	            // Selection changed; SwiftUI cancels the previous task.
+	            isImportingClips = false
+	        } catch {
+	            if let importSession, !didCommitImportSession {
+	                ClipDraftStore.discardImportSession(importSession)
+	            }
+	            isImportingClips = false
+	            errorMessage = error.localizedDescription
+	        }
+	    }
+
+    private func restoreDraftClipsIfNeeded() async {
+        guard !didRestoreDraftClips else { return }
+        didRestoreDraftClips = true
+
+        guard !hasUserPickedClips else { return }
+        guard pickerItems.isEmpty else { return }
+        guard clipSlots.isEmpty else { return }
+
+        guard let draft = ClipDraftStore.loadDraft(), !draft.clips.isEmpty else { return }
+        let restored: [PickedClip] = draft.clips.compactMap { rec in
+            guard let url = ClipDraftStore.fileURL(for: rec) else { return nil }
+            return PickedClip(id: rec.id, url: url, filename: rec.displayName, durationSeconds: rec.durationSeconds)
+        }
+        if !restored.isEmpty {
+            clipSlots = restored.map { Optional.some($0) }
         }
     }
 
@@ -416,6 +504,9 @@ struct ContentView: View {
            let token = session.accessToken?.trimmingCharacters(in: .whitespacesAndNewlines),
            !token.isEmpty
         {
+            // API Gateway integrations can strip the standard `Authorization` header, so send the
+            // app-specific token header too.
+            headers["X-Reelclaw-Token"] = token
             headers["Authorization"] = "Bearer \(token)"
         }
 
