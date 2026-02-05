@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -202,11 +202,19 @@ def require_user(
     authorization: str | None = Header(default=None),
     x_reelclaw_authorization: str | None = Header(default=None, alias="X-Reelclaw-Authorization"),
     x_reelclaw_token: str | None = Header(default=None, alias="X-Reelclaw-Token"),
+    token: str | None = Query(default=None),
 ) -> str:
     # Note: API Gateway HTTP APIs can drop/strip the standard `Authorization` header on the way to ALB/ECS.
     # To keep iOS simple (no domain needed) we also accept `X-Reelclaw-Authorization`.
     # Prefer standard Bearer auth, but fall back to a custom header that API Gateway reliably forwards.
-    token = bearer_token(authorization) or bearer_token(x_reelclaw_authorization) or (str(x_reelclaw_token or "").strip() or None)
+    token_param = str(token or "").strip() or None
+    token = (
+        bearer_token(authorization)
+        or bearer_token(x_reelclaw_authorization)
+        or (str(x_reelclaw_token or "").strip() or None)
+        or bearer_token(token_param)
+        or token_param
+    )
     if not token:
         raise HTTPException(
             status_code=401,

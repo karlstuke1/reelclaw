@@ -496,6 +496,7 @@ struct ContentView: View {
         var headers: [String: String] = [
             "Content-Type": contentType
         ]
+        var targetURL = uploadURL
 
         // Upload URLs can be:
         // - presigned S3 URLs (no Authorization header)
@@ -508,9 +509,18 @@ struct ContentView: View {
             // app-specific token header too.
             headers["X-Reelclaw-Token"] = token
             headers["Authorization"] = "Bearer \(token)"
+            targetURL = appendQueryItem(url: uploadURL, name: "token", value: token)
         }
 
-        try await UploadManager.shared.upload(fileURL: fileURL, to: uploadURL, headers: headers)
+        try await UploadManager.shared.upload(fileURL: fileURL, to: targetURL, headers: headers)
+    }
+
+    private func appendQueryItem(url: URL, name: String, value: String) -> URL {
+        guard var comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var items = comps.queryItems ?? []
+        items.append(URLQueryItem(name: name, value: value))
+        comps.queryItems = items
+        return comps.url ?? url
     }
 }
 
