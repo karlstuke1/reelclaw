@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,6 +16,24 @@ def _utc_now_iso() -> str:
 
 def _epoch_in(seconds: int) -> int:
     return int(time.time()) + int(seconds)
+
+
+def _dynamo_sanitize(value: Any) -> Any:
+    """
+    DynamoDB (via boto3 TypeSerializer) doesn't allow floats; use Decimal.
+    Also drop non-finite floats to None to avoid serialization errors.
+    """
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: _dynamo_sanitize(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_dynamo_sanitize(v) for v in value]
+    if isinstance(value, tuple):
+        return [_dynamo_sanitize(v) for v in value]
+    return value
 
 
 @dataclass
@@ -61,7 +81,7 @@ class DynamoJobStore:
             "batch_job_id": None,
             "ttl": ttl,
         }
-        self._table().put_item(Item=record)
+        self._table().put_item(Item=_dynamo_sanitize(record))
         return record
 
     def get(self, job_id: str) -> dict[str, Any] | None:
@@ -70,7 +90,7 @@ class DynamoJobStore:
         return item if isinstance(item, dict) else None
 
     def put(self, record: dict[str, Any]) -> None:
-        self._table().put_item(Item=dict(record))
+        self._table().put_item(Item=_dynamo_sanitize(dict(record)))
 
     def update(self, job_id: str, **fields: Any) -> dict[str, Any]:
         rec = self.get(job_id)
@@ -104,7 +124,7 @@ class DynamoDeviceStore:
     def upsert_device(self, *, user_id: str, device_id: str, record: dict[str, Any]) -> None:
         item = {"user_id": str(user_id), "device_id": str(device_id)}
         item.update(dict(record))
-        self._table().put_item(Item=item)
+        self._table().put_item(Item=_dynamo_sanitize(item))
 
     def list_devices(self, *, user_id: str) -> list[dict[str, Any]]:
         resp = self._table().query(

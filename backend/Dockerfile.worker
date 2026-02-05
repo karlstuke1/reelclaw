@@ -6,11 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg \
+  && apt-get install -y --no-install-recommends ffmpeg libgomp1 \
   && rm -rf /var/lib/apt/lists/*
 
-COPY backend/requirements.txt /app/backend/requirements.txt
-RUN pip install --no-cache-dir -r /app/backend/requirements.txt \
+COPY backend/requirements.txt backend/requirements.worker.txt /app/backend/
+RUN pip install --no-cache-dir -r /app/backend/requirements.worker.txt \
   && pip install --no-cache-dir yt-dlp
 
 # Worker needs the backend + reel replication pipeline code (no image-gen modules).
