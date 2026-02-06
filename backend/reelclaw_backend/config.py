@@ -41,6 +41,7 @@ class Settings:
     max_clip_bytes: int
     upload_url_ttl_seconds: int
     download_url_ttl_seconds: int
+    uploading_job_cleanup_seconds: int
 
 
 def load_settings() -> Settings:
@@ -78,6 +79,9 @@ def load_settings() -> Settings:
     max_clip_bytes = max(1, _int_env("REELCLAW_MAX_CLIP_BYTES", 250 * 1024 * 1024))
     upload_url_ttl_seconds = max(60, _int_env("REELCLAW_UPLOAD_URL_TTL_SECONDS", 900))
     download_url_ttl_seconds = max(60, _int_env("REELCLAW_DOWNLOAD_URL_TTL_SECONDS", 900))
+    # Stuck uploads can create lots of noise in the UI. Clean them up eventually.
+    # Default matches the per-job uploads S3 lifecycle (uploads/ expires after ~7d).
+    uploading_job_cleanup_seconds = max(0, _int_env("REELCLAW_UPLOADING_JOB_CLEANUP_SECONDS", 7 * 24 * 60 * 60))
 
     return Settings(
         data_dir=data_dir,
@@ -100,4 +104,5 @@ def load_settings() -> Settings:
         max_clip_bytes=max_clip_bytes,
         upload_url_ttl_seconds=upload_url_ttl_seconds,
         download_url_ttl_seconds=download_url_ttl_seconds,
+        uploading_job_cleanup_seconds=uploading_job_cleanup_seconds,
     )

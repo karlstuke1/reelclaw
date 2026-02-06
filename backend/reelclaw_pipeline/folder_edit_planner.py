@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import typing as t
 
-from .openrouter_client import OpenRouterError, chat_completions
+from .openrouter_client import OpenRouterError, chat_completions_budgeted
 
 
 def _strip_code_fences(text: str) -> str:
@@ -166,16 +166,19 @@ def tag_assets_from_thumbnails(
                 content.append({"type": "text", "text": f"THUMBNAIL {ti}/{len(show)}"})
                 content.append({"type": "image_url", "image_url": {"url": _encode_image_data_url(Path(tpath))}})
 
-        result = chat_completions(
+        result = chat_completions_budgeted(
             api_key=api_key,
             model=model,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": content}],
-            temperature=0.2,
-            max_tokens=1800,
+            # Deterministic + reliable JSON: we cache these tags globally and reuse them.
+            temperature=0.0,
+            max_tokens=int(float(os.getenv("SHOT_TAGGER_MAX_TOKENS", "1800") or 1800)),
             timeout_s=timeout_s,
             site_url=site_url,
             app_name=app_name,
-            reasoning=_reasoning_param(),
+            include_reasoning=False,
+            reasoning={"effort": "minimal"},
+            extra_body={"response_format": {"type": "json_object"}},
             retries=3,
             retry_delay_s=2.0,
         )
@@ -298,6 +301,10 @@ def analyze_reference_reel_segments(
             "- Do NOT infer sensitive attributes (age, race, etc.).",
             "- overlay_text MUST be max 2 lines; use a single \\n for the line break.",
             "- Keep overlay_text short: aim <= 26 chars per line.",
+            "- Keep everything concise so the JSON fits in one response:",
+            "  - analysis.* fields: <= 180 chars each",
+            "  - reference_visual: <= 160 chars",
+            "  - desired_tags: 6-8 tags max (short, generic)",
             "",
             "Return ONLY strict JSON:",
             "{",
@@ -347,18 +354,24 @@ def analyze_reference_reel_segments(
     last_error: Exception | None = None
     last_text = ""
     for attempt in range(1, 4):
-        result = chat_completions(
+        result = chat_completions_budgeted(
             api_key=api_key,
             model=model,
             messages=messages,
-            temperature=0.4 if attempt == 1 else 0.2,
-            max_tokens=2400,
+            # Deterministic and strict: avoid creative drift that breaks JSON.
+            temperature=0.0,
+            max_tokens=int(float(os.getenv("REF_ANALYSIS_MAX_TOKENS", "2400") or 2400)),
             timeout_s=timeout_s,
             site_url=site_url,
             app_name=app_name,
-            reasoning=_reasoning_param(),
+            # For structured JSON outputs, disable reasoning so it can't consume the token
+            # budget (finish_reason=length) and truncate the JSON.
+            include_reasoning=False,
+            reasoning={"effort": "minimal"},
             retries=3,
             retry_delay_s=2.0,
+            # Ask OpenRouter to enforce JSON-only outputs when supported by the model.
+            extra_body={"response_format": {"type": "json_object"}},
         )
         last_text = result.content or ""
         try:
@@ -378,7 +391,7 @@ def analyze_reference_reel_segments(
                     "content": [
                         {
                             "type": "text",
-                            "text": "Your last response was not strict JSON. Reprint ONLY valid JSON (no markdown, no extra text, no escaped quotes like \\\\\"key\\\\\").",
+                            "text": "Your last response was not strict JSON. Reprint ONLY valid JSON (no markdown, no extra text). Keep it SHORTER: analysis fields <=140 chars, reference_visual <=140 chars, desired_tags <=6 per segment.",
                         }
                     ],
                 },
@@ -540,12 +553,12 @@ def refine_inpoint_for_segment(
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
     last_text = ""
     for attempt in range(1, 4):
-        result = chat_completions(
+        result = chat_completions_budgeted(
             api_key=api_key,
             model=model,
             messages=messages,
             temperature=0.0,
-            max_tokens=240,
+            max_tokens=int(float(os.getenv("INPOINT_REFINE_MAX_TOKENS", "240") or 240)),
             timeout_s=timeout_s,
             site_url=site_url,
             app_name=app_name,
@@ -707,12 +720,12 @@ def plan_folder_edit_edl(
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}]
     last_text = ""
     for attempt in range(1, 4):
-        result = chat_completions(
+        result = chat_completions_budgeted(
             api_key=api_key,
             model=model,
             messages=messages,
             temperature=0.1 if attempt == 1 else 0.0,
-            max_tokens=4096,
+            max_tokens=int(float(os.getenv("FOLDER_EDIT_PLAN_MAX_TOKENS", "4096") or 4096)),
             timeout_s=timeout_s,
             site_url=site_url,
             app_name=app_name,

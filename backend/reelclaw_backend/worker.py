@@ -31,9 +31,10 @@ def _apply_pro_defaults(env: dict[str, str]) -> None:
     env.setdefault("FOLDER_EDIT_STORY_PLANNER", "1")
     env.setdefault("SHOT_INDEX_MODE", "scene")
     env.setdefault("SHOT_INDEX_WORKERS", "4")
+    # Shot-level tagging is a key part of the pro pipeline "editor brain".
+    # Cap with SHOT_TAG_MAX to keep local runs bounded on huge libraries.
     env.setdefault("SHOT_TAGGING", "1")
-    # Local default: keep tagging bounded to avoid the appearance of "hanging" on big libraries.
-    env.setdefault("SHOT_TAG_MAX", "400")
+    env.setdefault("SHOT_TAG_MAX", "250")
     env.setdefault("REF_SEGMENT_FRAME_COUNT", "3")
     env.setdefault("REASONING_EFFORT", "high")
     # Directed quality lift: generate more internal candidates, fix worst segments on finalists.
@@ -103,8 +104,19 @@ class JobRunner:
 
         variations = int(job.get("variations") or 3)
         burn_overlays = bool(job.get("burn_overlays") or False)
+        director = str(job.get("director") or "").strip().lower() or None
+        if director not in {"code", "gemini", "auto"}:
+            director = None
+
         pro_mode = _truthy_env("REELCLAW_PRO_MODE", "1")
+        # Gemini/auto director requires pro mode (shot candidates); force it per-job if requested.
+        if director in {"gemini", "auto"}:
+            pro_mode = True
+
         internal_variants = _internal_variant_count(finals=variations, pro_mode=pro_mode)
+        # Cost/latency guardrail: Gemini director does one LLM call per variant. Cap by default.
+        if director in {"gemini", "auto"} and internal_variants > 12 and not _truthy_env("ALLOW_GEMINI_DIRECTOR_MANY", "0"):
+            internal_variants = max(int(variations), 12)
 
         job_dir = self.jobs.job_dir(job_id)
         uploads_dir = job_dir / "uploads"
@@ -163,6 +175,8 @@ class JobRunner:
             ]
             if pro_mode:
                 cmd.append("--pro")
+            if director:
+                cmd.extend(["--director", str(director)])
             if burn_overlays:
                 cmd.append("--burn-overlays")
 

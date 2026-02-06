@@ -171,6 +171,13 @@ def _compute_eq_grade(
     out_dark: float | None,
     ref_rgb: list[float] | None = None,
     out_rgb: list[float] | None = None,
+    # Optional: richer per-frame stats enable more robust, deterministic look matching.
+    ref_luma_std: float | None = None,
+    out_luma_std: float | None = None,
+    ref_chroma: float | None = None,
+    out_chroma: float | None = None,
+    ref_frame_path: Path | None = None,
+    out_frame_path: Path | None = None,
 ) -> dict[str, float] | None:
     """Compute a mild per-segment eq() grade to reduce lighting mismatch.
 
@@ -181,6 +188,20 @@ def _compute_eq_grade(
         return None
 
     grade: dict[str, float] = {}
+
+    # Optional richer stats: compute from frame paths if needed.
+    if (ref_luma_std is None or ref_chroma is None) and isinstance(ref_frame_path, Path) and ref_frame_path.exists():
+        try:
+            ref_luma_std = ref_luma_std if ref_luma_std is not None else _luma_std(ref_frame_path)
+            ref_chroma = ref_chroma if ref_chroma is not None else _chroma_mean(ref_frame_path)
+        except Exception:
+            pass
+    if (out_luma_std is None or out_chroma is None) and isinstance(out_frame_path, Path) and out_frame_path.exists():
+        try:
+            out_luma_std = out_luma_std if out_luma_std is not None else _luma_std(out_frame_path)
+            out_chroma = out_chroma if out_chroma is not None else _chroma_mean(out_frame_path)
+        except Exception:
+            pass
 
     dl = float(ref_luma) - float(out_luma)
     dd = 0.0
@@ -204,10 +225,18 @@ def _compute_eq_grade(
         # +/-0.22 isn't enough to approach a reference look.
         brightness = _clamp(dl * 0.95, -0.30, 0.30)
 
-        # contrast default is 1.0; keep within a subtle range.
+        # Contrast default is 1.0; keep within a subtle range.
+        # Start with a dark-fraction heuristic, then optionally blend in a luma-std ratio
+        # when we have richer stats (reduces "flat" or "crushed" mismatches).
         contrast = 1.0
         if abs(dd) >= 0.05:
             contrast = _clamp(1.0 + (dd * 0.95), 0.75, 1.55)
+        if isinstance(ref_luma_std, (int, float)) and isinstance(out_luma_std, (int, float)) and float(out_luma_std) > 0.015:
+            ratio = float(ref_luma_std) / max(0.015, float(out_luma_std))
+            # Dampen so one noisy frame doesn't blow up contrast.
+            contrast2 = _clamp(1.0 + ((ratio - 1.0) * 0.75), 0.75, 1.55)
+            if abs(contrast2 - 1.0) > abs(contrast - 1.0):
+                contrast = float(contrast2)
 
         # If the reference is extremely dark, bias toward keeping things low-key.
         try:
@@ -221,6 +250,20 @@ def _compute_eq_grade(
             grade["brightness"] = float(brightness)
         if abs(contrast - 1.0) >= 0.02:
             grade["contrast"] = float(contrast)
+
+    # Optional: saturation correction (proxy based on per-frame chroma mean).
+    if isinstance(ref_chroma, (int, float)) and isinstance(out_chroma, (int, float)) and float(out_chroma) > 0.01:
+        sat_ratio = float(ref_chroma) / max(0.01, float(out_chroma))
+        # Dampen and clamp; keep this subtle to avoid "Instagram filter" vibes.
+        saturation = _clamp(1.0 + ((sat_ratio - 1.0) * 0.85), 0.60, 1.70)
+        try:
+            # Very dark references often have naturally lower perceived saturation; avoid pushing too far.
+            if ref_dark is not None and float(ref_dark) >= 0.93:
+                saturation = _clamp(saturation, 0.70, 1.45)
+        except Exception:
+            pass
+        if abs(float(saturation) - 1.0) >= 0.06:
+            grade["saturation"] = float(saturation)
 
     # Optional: mild channel gain correction (acts like a simple white-balance / tint match).
     if (
@@ -250,6 +293,79 @@ def _compute_eq_grade(
             grade["b_gain"] = float(bg)
 
     return grade or None
+
+
+def _smooth_grade_step(
+    *,
+    prev_segment: t.Any | None,
+    prev_grade: dict[str, float] | None,
+    segment: t.Any,
+    grade: dict[str, float] | None,
+) -> dict[str, float] | None:
+    """
+    Reduce "grade flicker" by clamping per-segment grade deltas when the *reference* does not
+    significantly jump in exposure. This keeps look continuity feeling intentional.
+
+    Deterministic and conservative: it never invents grades, it only clamps the magnitude of
+    existing grade deltas.
+    """
+    if grade is None or not isinstance(grade, dict):
+        return grade
+    if prev_segment is None or prev_grade is None or not isinstance(prev_grade, dict):
+        return grade
+    if not _truthy_env("FOLDER_EDIT_GRADE_SMOOTH", "1"):
+        return grade
+
+    def _sf(x: t.Any) -> float | None:
+        try:
+            return float(x)
+        except Exception:
+            return None
+
+    # Only smooth when the *reference* look is stable (avoid flattening intentional ref changes).
+    pl = _sf(getattr(prev_segment, "ref_luma", None))
+    cl = _sf(getattr(segment, "ref_luma", None))
+    pd = _sf(getattr(prev_segment, "ref_dark_frac", None))
+    cd = _sf(getattr(segment, "ref_dark_frac", None))
+    l_jump = abs(float(cl) - float(pl)) if (pl is not None and cl is not None) else None
+    d_jump = abs(float(cd) - float(pd)) if (pd is not None and cd is not None) else None
+    l_th = float(_float_env("FOLDER_EDIT_GRADE_SMOOTH_REF_LUMA_TH", "0.07"))
+    d_th = float(_float_env("FOLDER_EDIT_GRADE_SMOOTH_REF_DARK_TH", "0.20"))
+    ref_stable = True
+    if l_jump is not None and float(l_jump) > float(l_th):
+        ref_stable = False
+    if d_jump is not None and float(d_jump) > float(d_th):
+        ref_stable = False
+    if not ref_stable:
+        return grade
+
+    out = dict(grade)
+    b_step = float(_float_env("FOLDER_EDIT_GRADE_SMOOTH_B_STEP", "0.08"))
+    c_step = float(_float_env("FOLDER_EDIT_GRADE_SMOOTH_C_STEP", "0.18"))
+    s_step = float(_float_env("FOLDER_EDIT_GRADE_SMOOTH_S_STEP", "0.22"))
+    g_step = float(_float_env("FOLDER_EDIT_GRADE_SMOOTH_GAMMA_STEP", "0.18"))
+    gain_step = float(_float_env("FOLDER_EDIT_GRADE_SMOOTH_GAIN_STEP", "0.12"))
+
+    def _clamp_step(key: str, step: float) -> None:
+        cur = _sf(out.get(key))
+        prev = _sf(prev_grade.get(key) if isinstance(prev_grade, dict) else None)
+        if cur is None or prev is None:
+            return
+        lo = float(prev) - float(step)
+        hi = float(prev) + float(step)
+        if float(cur) < lo:
+            out[key] = float(lo)
+        elif float(cur) > hi:
+            out[key] = float(hi)
+
+    _clamp_step("brightness", b_step)
+    _clamp_step("contrast", c_step)
+    _clamp_step("saturation", s_step)
+    _clamp_step("gamma", g_step)
+    _clamp_step("r_gain", gain_step)
+    _clamp_step("g_gain", gain_step)
+    _clamp_step("b_gain", gain_step)
+    return out
 
 
 def _shortlist_assets_for_segment(
@@ -405,7 +521,7 @@ def _maybe_analyze_music(
     if not audio_path or not Path(audio_path).exists():
         return None
     try:
-        from music_analysis import analyze_music  # local module
+        from .music_analysis import analyze_music
     except Exception:
         return None
 
@@ -434,7 +550,7 @@ def _beat_snap_segments(
         return segments
 
     try:
-        from music_analysis import snap_times  # local module
+        from .music_analysis import snap_times
     except Exception:
         return segments
 
@@ -460,6 +576,8 @@ def _beat_snap_segments(
 
 # Cache stabilized video paths within a single process to avoid repeated work.
 _STABILIZED_VIDEO_CACHE: dict[str, Path] = {}
+# Cache per-segment vidstab transform files (also within a single process).
+_VIDSTAB_TRF_CACHE: dict[str, Path] = {}
 
 
 def _file_fingerprint(path: Path) -> str:
@@ -492,7 +610,10 @@ def _ensure_stabilized_video(
 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    key = _file_fingerprint(src)
+    # NOTE: vidstab binary transform serialization appears to be broken on some ffmpeg/libvidstab
+    # builds (we observed "Cannot parse localmotion!" from vidstabtransform). Force ASCII transform
+    # files, and bake that into the cache key so older binary caches won't be reused.
+    key = f"{_file_fingerprint(src)}::vidstab_ascii_v1"
     cached = _STABILIZED_VIDEO_CACHE.get(key)
     if cached and cached.exists():
         return cached
@@ -517,7 +638,7 @@ def _ensure_stabilized_video(
             "-i",
             str(src),
             "-vf",
-            f"vidstabdetect=shakiness={shakiness}:accuracy={accuracy}:result={_escape_filter_value(str(trf))}",
+            f"vidstabdetect=shakiness={shakiness}:accuracy={accuracy}:fileformat=ascii:result={_escape_filter_value(str(trf))}",
             "-f",
             "null",
             "-",
@@ -557,6 +678,68 @@ def _ensure_stabilized_video(
 
     _STABILIZED_VIDEO_CACHE[key] = out
     return out
+
+
+def _ensure_vidstab_trf_for_segment(
+    *,
+    src: Path,
+    cache_dir: Path,
+    start_s: float,
+    duration_s: float,
+    timeout_s: float,
+) -> Path:
+    """
+    Build a vidstab transform file for a specific time window of a source clip.
+
+    This is dramatically faster than stabilizing the entire source, and avoids writing an
+    intermediate stabilized mp4. It is safe because we compute and apply transforms on the
+    exact same trimmed window (frame indices match).
+    """
+    ffmpeg = os.getenv("FFMPEG", "") or shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to stabilize video. Please install ffmpeg and try again.")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Quantize times so cache keys remain stable across float jitter.
+    s_q = round(float(start_s or 0.0), 3)
+    d_q = round(max(0.01, float(duration_s or 0.0)), 3)
+
+    # Vidstab params: keep conservative defaults; tune via env if needed.
+    shakiness = int(max(1, min(10, _float_env("FOLDER_EDIT_STABILIZE_SHAKINESS", "6"))))
+    accuracy = int(max(1, min(15, _float_env("FOLDER_EDIT_STABILIZE_ACCURACY", "10"))))
+
+    # Force ASCII fileformat for reliability. Bake into cache key so we don't reuse older binary .trf files.
+    key = f"{_file_fingerprint(src)}::{s_q:.3f}::{d_q:.3f}::{shakiness}::{accuracy}::ascii"
+    cached = _VIDSTAB_TRF_CACHE.get(key)
+    if cached and cached.exists():
+        return cached
+
+    hid = hashlib.sha1(key.encode("utf-8", errors="replace")).hexdigest()[:12]
+    trf = cache_dir / f"{hid}.trf"
+    if trf.exists():
+        _VIDSTAB_TRF_CACHE[key] = trf
+        return trf
+
+    detect = [
+        ffmpeg,
+        "-y",
+        "-ss",
+        f"{s_q:.3f}",
+        "-i",
+        str(src),
+        "-t",
+        f"{d_q:.3f}",
+        "-vf",
+        f"vidstabdetect=shakiness={shakiness}:accuracy={accuracy}:fileformat=ascii:result={_escape_filter_value(str(trf))}",
+        "-f",
+        "null",
+        "-",
+    ]
+    _run(detect, timeout_s=timeout_s)
+
+    _VIDSTAB_TRF_CACHE[key] = trf
+    return trf
 
 
 def _extract_frame(
@@ -655,6 +838,156 @@ def _rgb_mean(path: Path) -> list[float] | None:
         return [float(r) / 255.0, float(g) / 255.0, float(b) / 255.0]
     except Exception:
         return None
+
+
+def _luma_std(path: Path) -> float | None:
+    """
+    Standard deviation of grayscale pixels (0..1).
+    Used as a cheap contrast proxy for deterministic color matching.
+    """
+    if Image is None:
+        return None
+    try:
+        img = Image.open(path).convert("L").resize((64, 64))
+        px = list(img.getdata())
+        if not px:
+            return None
+        mu = sum(px) / len(px)
+        var = sum((float(p) - float(mu)) ** 2 for p in px) / float(max(1, len(px)))
+        return float((var**0.5) / 255.0)
+    except Exception:
+        return None
+
+
+def _chroma_mean(path: Path) -> float | None:
+    """
+    Mean per-pixel chroma proxy (0..1):
+    average(max(R,G,B) - min(R,G,B)) / 255.
+    Used as a cheap saturation proxy for deterministic look matching.
+    """
+    if Image is None:
+        return None
+    try:
+        img = Image.open(path).convert("RGB").resize((64, 64))
+        px = list(img.getdata())
+        if not px:
+            return None
+        total = 0.0
+        for r, g, b in px:
+            total += float(max(int(r), int(g), int(b)) - min(int(r), int(g), int(b)))
+        return float(total / max(1.0, float(len(px)) * 255.0))
+    except Exception:
+        return None
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    vals = sorted(float(x) for x in values)
+    n = len(vals)
+    if n <= 0:
+        return None
+    mid = n // 2
+    if n % 2 == 1:
+        return float(vals[mid])
+    return float((vals[mid - 1] + vals[mid]) * 0.5)
+
+
+def _percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    vals = sorted(float(x) for x in values)
+    n = len(vals)
+    if n <= 0:
+        return None
+    qq = max(0.0, min(1.0, float(q)))
+    idx = int(round(qq * float(n - 1)))
+    idx = max(0, min(n - 1, idx))
+    return float(vals[idx])
+
+
+def _median_rgb(values: list[list[float]]) -> list[float] | None:
+    if not values:
+        return None
+    ch0: list[float] = []
+    ch1: list[float] = []
+    ch2: list[float] = []
+    for v in values:
+        if not (isinstance(v, list) and len(v) >= 3):
+            continue
+        if not all(isinstance(x, (int, float)) for x in v[:3]):
+            continue
+        ch0.append(float(v[0]))
+        ch1.append(float(v[1]))
+        ch2.append(float(v[2]))
+    if not ch0:
+        return None
+    m0 = _median(ch0)
+    m1 = _median(ch1)
+    m2 = _median(ch2)
+    if m0 is None or m1 is None or m2 is None:
+        return None
+    return [float(m0), float(m1), float(m2)]
+
+
+def _robust_frame_stats(frame_paths: list[Path]) -> dict[str, t.Any]:
+    """
+    Compute robust (median) per-frame stats for deterministic look matching.
+    Used to reduce grade flicker and make ref metrics less sensitive to a single frame.
+    """
+    lumas: list[float] = []
+    darks: list[float] = []
+    rgbs: list[list[float]] = []
+    lstds: list[float] = []
+    chromas: list[float] = []
+    luma_max: float | None = None
+    dark_min: float | None = None
+    rgb_at_luma_max: list[float] | None = None
+    frame_at_luma_max: str | None = None
+    for p in frame_paths:
+        if not isinstance(p, Path) or not p.exists():
+            continue
+        l = _luma_mean(p)
+        d = _dark_frac(p)
+        r = _rgb_mean(p)
+        ls = _luma_std(p)
+        c = _chroma_mean(p)
+        if isinstance(l, (int, float)):
+            lf = float(l)
+            lumas.append(lf)
+            if luma_max is None or lf > float(luma_max):
+                luma_max = lf
+                frame_at_luma_max = str(p)
+                if isinstance(r, list) and len(r) == 3 and all(isinstance(x, (int, float)) for x in r):
+                    rgb_at_luma_max = [float(r[0]), float(r[1]), float(r[2])]
+        if isinstance(d, (int, float)):
+            df = float(d)
+            darks.append(df)
+            if dark_min is None or df < float(dark_min):
+                dark_min = df
+        if isinstance(r, list) and len(r) == 3 and all(isinstance(x, (int, float)) for x in r):
+            rgbs.append([float(r[0]), float(r[1]), float(r[2])])
+        if isinstance(ls, (int, float)):
+            lstds.append(float(ls))
+        if isinstance(c, (int, float)):
+            chromas.append(float(c))
+
+    return {
+        # Central tendency (stable against single-frame flares/black frames).
+        "luma": _median(lumas),
+        "dark_frac": _median(darks),
+        # Extremes: useful for detecting within-segment flares / exposure spikes.
+        "luma_max": luma_max,
+        "dark_min": dark_min,
+        "rgb_at_luma_max": rgb_at_luma_max,
+        "frame_at_luma_max": frame_at_luma_max,
+        # Tail stats: useful for low-key reference matching where brief bright spikes still feel like flicker.
+        "luma_p75": _percentile(lumas, 0.75),
+        "dark_p25": _percentile(darks, 0.25),
+        "rgb_mean": _median_rgb(rgbs),
+        "luma_std": _median(lstds),
+        "chroma": _median(chromas),
+    }
 
 
 def _motion_score_from_thumbs(paths: list[Path]) -> float | None:
@@ -953,16 +1286,6 @@ def _render_segment(
     vbitrate = (os.getenv("FOLDER_EDIT_RENDER_VBITRATE", "") or "2500k").strip() or "2500k"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Optional stabilization: stabilize the whole source once, then trim the segment.
-    if stabilize and asset_kind == "video" and asset_path.exists():
-        stab_dir = stabilize_cache_dir or (output_path.parent / "stabilized_cache")
-        stab_timeout = max(timeout_s, _float_env("FOLDER_EDIT_STABILIZE_TIMEOUT", "600"))
-        try:
-            asset_path = _ensure_stabilized_video(src=asset_path, cache_dir=stab_dir, timeout_s=stab_timeout)
-        except Exception:
-            # If stabilization fails, fall back to the original source.
-            pass
-
     draw_filter: str | None = None
     if burn_overlay and (overlay_text or "").strip():
         # Caption as a textfile to avoid quoting bugs.
@@ -1045,6 +1368,41 @@ def _render_segment(
     zoom_f = min(1.25, max(1.0, zoom_f))
 
     vf_parts: list[str] = []
+
+    # Optional stabilization: default to per-segment vidstab (fast, avoids warpy full-clip transforms),
+    # but allow legacy full-clip stabilization via FOLDER_EDIT_STABILIZE_MODE=full.
+    #
+    # Stabilization filters should run before scaling/cropping.
+    trf_path: Path | None = None
+    if stabilize and asset_kind == "video" and asset_path.exists():
+        mode = (os.getenv("FOLDER_EDIT_STABILIZE_MODE", "segment") or "segment").strip().lower()
+        stab_dir = stabilize_cache_dir or (output_path.parent / "stabilized_cache")
+        stab_timeout = max(timeout_s, _float_env("FOLDER_EDIT_STABILIZE_TIMEOUT", "600"))
+
+        if mode == "full":
+            try:
+                asset_path = _ensure_stabilized_video(src=asset_path, cache_dir=stab_dir, timeout_s=stab_timeout)
+            except Exception:
+                # If stabilization fails, fall back to the original source.
+                pass
+        else:
+            # Segment-window stabilization: compute a transform file on the same input window that we will render.
+            try:
+                src_window_s = float(duration_s) * float(speed_f)
+                trf_path = _ensure_vidstab_trf_for_segment(
+                    src=asset_path,
+                    cache_dir=stab_dir,
+                    start_s=float(in_s),
+                    duration_s=float(src_window_s),
+                    timeout_s=stab_timeout,
+                )
+            except Exception:
+                trf_path = None
+
+    if isinstance(trf_path, Path) and trf_path.exists():
+        smoothing = int(max(0, min(60, _float_env("FOLDER_EDIT_STABILIZE_SMOOTHING", "12"))))
+        vf_parts.append(f"vidstabtransform=input={_escape_filter_value(str(trf_path))}:smoothing={smoothing}:optzoom=1")
+
     if asset_kind == "video" and abs(speed_f - 1.0) >= 0.01:
         vf_parts.append(f"setpts=PTS/{speed_f:.4f}")
 
@@ -1079,8 +1437,16 @@ def _render_segment(
             c = float(grade.get("contrast") or 1.0)
         except Exception:
             c = 1.0
-        if abs(b) >= 0.005 or abs(c - 1.0) >= 0.01:
-            vf_parts.append(f"eq=brightness={b:.4f}:contrast={c:.4f}")
+        try:
+            sat = float(grade.get("saturation") or 1.0)
+        except Exception:
+            sat = 1.0
+        try:
+            gamma = float(grade.get("gamma") or 1.0)
+        except Exception:
+            gamma = 1.0
+        if abs(b) >= 0.005 or abs(c - 1.0) >= 0.01 or abs(sat - 1.0) >= 0.02 or abs(gamma - 1.0) >= 0.02:
+            vf_parts.append(f"eq=brightness={b:.4f}:contrast={c:.4f}:saturation={sat:.4f}:gamma={gamma:.4f}")
     if draw_filter:
         vf_parts.append(draw_filter)
 
@@ -1342,9 +1708,32 @@ def run_folder_edit_pipeline(
     emit("Analyze", 2, 2, "Analysis complete")
 
     # Attach simple luminance + darkness metrics to each segment to help match low-key reels.
-    seg_luma: dict[int, float | None] = {sid: _luma_mean(p) for sid, _s, _e, p in segment_frames}
-    seg_dark: dict[int, float | None] = {sid: _dark_frac(p) for sid, _s, _e, p in segment_frames}
-    seg_rgb: dict[int, list[float] | None] = {sid: _rgb_mean(p) for sid, _s, _e, p in segment_frames}
+    # Use multi-frame medians by default to reduce noise (single-frame metrics can cause grade flicker).
+    use_multi_ref = _truthy_env("FOLDER_EDIT_REF_METRICS_MULTI", "1")
+    seg_luma: dict[int, float | None] = {}
+    seg_dark: dict[int, float | None] = {}
+    seg_rgb: dict[int, list[float] | None] = {}
+    if use_multi_ref and segment_frames_multi:
+        for sid, _s, _e, paths0 in segment_frames_multi:
+            fps = [Path(p) for _t, p in (paths0 or []) if isinstance(p, (Path, str))]
+            fps2: list[Path] = []
+            for p in fps:
+                try:
+                    pp = Path(p).expanduser()
+                except Exception:
+                    continue
+                if pp.exists():
+                    fps2.append(pp)
+            stats = _robust_frame_stats(fps2)
+            l0 = stats.get("luma")
+            d0 = stats.get("dark_frac")
+            seg_luma[int(sid)] = float(l0) if isinstance(l0, (int, float)) else None
+            seg_dark[int(sid)] = float(d0) if isinstance(d0, (int, float)) else None
+            seg_rgb[int(sid)] = (stats.get("rgb_mean") if isinstance(stats.get("rgb_mean"), list) else None)
+    else:
+        seg_luma = {sid: _luma_mean(p) for sid, _s, _e, p in segment_frames}
+        seg_dark = {sid: _dark_frac(p) for sid, _s, _e, p in segment_frames}
+        seg_rgb = {sid: _rgb_mean(p) for sid, _s, _e, p in segment_frames}
     try:
         from .folder_edit_planner import ReferenceAnalysisPlan, ReferenceSegmentPlan
 
@@ -1476,61 +1865,101 @@ def run_folder_edit_pipeline(
             }
         )
 
+    # Asset-level thumbnail tagging is cheap editorial intelligence that both the legacy and pro
+    # pipelines can consume (pro inherits via shot_index.py, even when shot-level tagging is capped).
+    TAG_CACHE_VERSION = 2  # bump when tagger inputs/outputs change materially (e.g. multi-thumbnail tagging)
     tags: dict[str, t.Any] = {}
-    if not pro_mode:
-        emit("Library", 1, 3, "Tagging thumbnails")
-        TAG_CACHE_VERSION = 2  # bump when tagger inputs/outputs change materially (e.g. multi-thumbnail tagging)
-        need_write_global_cache = False
-        # Reuse tags across runs to avoid re-tagging the same local footage for every reel.
-        if global_tagged_path.exists():
-            try:
-                cached = json.loads(global_tagged_path.read_text(encoding="utf-8"))
-                cached_tags = cached.get("tags") or {}
-                if isinstance(cached_tags, dict):
-                    tags = cached_tags
+    need_write_global_cache = False
 
-                # Back-compat: older cache may not have a version key. Keep the tags to avoid re-tagging,
-                # but upgrade the file on disk to the current versioned format.
-                v = cached.get("version", None)
-                if v is None:
-                    need_write_global_cache = True
-                else:
-                    try:
-                        if int(v) != TAG_CACHE_VERSION:
-                            need_write_global_cache = True
-                    except Exception:
+    # Reuse tags across runs to avoid re-tagging the same local footage for every reel.
+    if global_tagged_path.exists():
+        try:
+            cached = json.loads(global_tagged_path.read_text(encoding="utf-8", errors="replace") or "{}")
+            cached_tags = cached.get("tags") or {}
+            if isinstance(cached_tags, dict):
+                tags = cached_tags
+
+            # Back-compat: older cache may not have a version key. Keep the tags to avoid re-tagging,
+            # but upgrade the file on disk to the current versioned format.
+            v = cached.get("version", None)
+            if v is None:
+                need_write_global_cache = True
+            else:
+                try:
+                    if int(v) != TAG_CACHE_VERSION:
                         need_write_global_cache = True
-            except Exception:
-                tags = {}
-        if tagged_path.exists():
-            try:
-                local_doc = json.loads(tagged_path.read_text(encoding="utf-8"))
-                local_tags = local_doc.get("tags") or {}
-                if isinstance(local_tags, dict):
-                    tags.update(local_tags)
-            except Exception:
-                pass
+                except Exception:
+                    need_write_global_cache = True
+        except Exception:
+            tags = {}
 
-        # Seed/upgrade the global cache even if we didn't need to tag anything this run.
-        if tags and (need_write_global_cache or not global_tagged_path.exists()):
-            try:
-                global_tagged_path.parent.mkdir(parents=True, exist_ok=True)
-                global_tagged_path.write_text(json.dumps({"version": TAG_CACHE_VERSION, "tags": tags}, indent=2), encoding="utf-8")
-            except Exception:
-                pass
+    if tagged_path.exists():
+        try:
+            local_doc = json.loads(tagged_path.read_text(encoding="utf-8", errors="replace") or "{}")
+            local_tags = local_doc.get("tags") or {}
+            if isinstance(local_tags, dict):
+                tags.update(local_tags)
+        except Exception:
+            pass
 
-        missing = [a for a in assets_for_tagger if str(a["id"]) not in tags]
+    # Seed/upgrade the global cache even if we didn't need to tag anything this run.
+    if tags and (need_write_global_cache or not global_tagged_path.exists()):
+        try:
+            global_tagged_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = global_tagged_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"version": TAG_CACHE_VERSION, "tags": tags}, indent=2), encoding="utf-8")
+            tmp.replace(global_tagged_path)
+        except Exception:
+            pass
+
+    do_asset_tag = bool(api_key and analysis_model) and _truthy_env("FOLDER_EDIT_ASSET_TAGGING", "1")
+    if do_asset_tag:
+        # Deterministic cap: align tagging coverage with shot-index capping so pro runs don't
+        # accidentally tag hundreds of assets in huge libraries.
+        max_videos = 0
+        try:
+            max_videos = int(float(os.getenv("SHOT_INDEX_MAX_VIDEOS", "0") or 0))
+        except Exception:
+            max_videos = 0
+        max_videos = int(max(0, max_videos))
+
+        max_tag: int | None = None
+        raw_max = str(os.getenv("FOLDER_EDIT_ASSET_TAG_MAX", "") or "").strip()
+        if raw_max:
+            try:
+                mv = int(float(raw_max))
+                if mv > 0:
+                    max_tag = int(mv)
+            except Exception:
+                max_tag = None
+        if max_tag is None and pro_mode:
+            max_tag = int(max_videos) if max_videos > 0 else 120
+
+        # Deterministic ordering by asset path; pro mode tags only video assets (shot index only indexes video).
+        assets_sorted = [a for a in assets_for_tagger if str(a.get("id") or "").strip()]
+        if pro_mode:
+            assets_sorted = [a for a in assets_sorted if str(a.get("kind") or "").strip() == "video"]
+        assets_sorted.sort(key=lambda a: str(a.get("path") or ""))
+        if pro_mode and max_videos > 0 and len(assets_sorted) > max_videos:
+            assets_sorted = assets_sorted[: int(max_videos)]
+
+        missing = [a for a in assets_sorted if str(a.get("id") or "") and str(a["id"]) not in tags]
+        if max_tag is not None and max_tag > 0:
+            missing = missing[: int(max_tag)]
+
         if missing:
+            emit("Library", 1, 3, "Tagging thumbnails")
+            tag_model = str(os.getenv("FOLDER_EDIT_ASSET_TAG_MODEL", "") or "").strip() or str(analysis_model)
             new_tags = tag_assets_from_thumbnails(
                 api_key=api_key,
-                model=analysis_model,
+                model=tag_model,
                 assets=missing,
                 timeout_s=timeout_s,
                 site_url=site_url,
                 app_name=app_name,
             )
             for aid, tinfo in new_tags.items():
-                tags[aid] = {
+                tags[str(aid)] = {
                     "description": tinfo.description,
                     "tags": tinfo.tags,
                     "shot_type": tinfo.shot_type,
@@ -1541,7 +1970,9 @@ def run_folder_edit_pipeline(
             tagged_path.write_text(json.dumps({"version": TAG_CACHE_VERSION, "tags": tags}, indent=2), encoding="utf-8")
             try:
                 global_tagged_path.parent.mkdir(parents=True, exist_ok=True)
-                global_tagged_path.write_text(json.dumps({"version": TAG_CACHE_VERSION, "tags": tags}, indent=2), encoding="utf-8")
+                tmp = global_tagged_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps({"version": TAG_CACHE_VERSION, "tags": tags}, indent=2), encoding="utf-8")
+                tmp.replace(global_tagged_path)
             except Exception:
                 pass
 
@@ -1868,6 +2299,8 @@ def run_folder_edit_pipeline(
             segment_paths: list[Path] = []
             timeline_segments: list[dict[str, t.Any]] = []
             fade_tail = _float_env("FOLDER_EDIT_FADE_OUT_S", "0.18")
+            prev_seg_for_grade = None
+            prev_grade: dict[str, float] | None = None
             for idx, seg in enumerate(segments_for_edit, start=1):
                 if cancel_event.is_set():
                     raise CancelledError("Cancelled during rendering")
@@ -1887,6 +2320,58 @@ def run_folder_edit_pipeline(
                 asset_kind = str(asset_meta.get("kind") or "video")
                 out_path = segments_dir / f"seg_{seg.id:02d}.mp4"
 
+                # Lane A timing overrides (Two-Lane improvement loop; applied at render time).
+                in_s = float(dec.in_s)
+                speed = float(dec.speed)
+                timing_overrides = render_overrides_by_seg_id.get(int(seg.id))
+                if isinstance(timing_overrides, dict):
+                    # Speed override first (affects shot-window feasibility).
+                    if "speed" in timing_overrides and timing_overrides.get("speed") is not None:
+                        try:
+                            sp_req = float(timing_overrides.get("speed"))
+                            sp = _clamp(sp_req, 0.85, 1.25)
+                        except Exception:
+                            sp = None
+                        if sp is not None:
+                            if (
+                                isinstance(chosen_shot, dict)
+                                and isinstance(chosen_shot.get("start_s"), (int, float))
+                                and isinstance(chosen_shot.get("end_s"), (int, float))
+                            ):
+                                shot_len = float(chosen_shot.get("end_s")) - float(chosen_shot.get("start_s"))
+                                if shot_len + 1e-6 >= float(seg.duration_s) * float(sp):
+                                    speed = float(sp)
+                            else:
+                                speed = float(sp)
+
+                    if "shift_inpoint_s" in timing_overrides and timing_overrides.get("shift_inpoint_s") is not None:
+                        try:
+                            dt_req = float(timing_overrides.get("shift_inpoint_s"))
+                            dt = _clamp(dt_req, -0.60, 0.60)
+                            in_s = float(in_s) + float(dt)
+                        except Exception:
+                            pass
+
+                # Clamp in_s to the chosen shot window to avoid looping.
+                if (
+                    isinstance(chosen_shot, dict)
+                    and isinstance(chosen_shot.get("start_s"), (int, float))
+                    and isinstance(chosen_shot.get("end_s"), (int, float))
+                ):
+                    start_s = float(chosen_shot.get("start_s"))
+                    end_s = float(chosen_shot.get("end_s"))
+                    max_start = float(end_s) - (float(seg.duration_s) * float(speed))
+                    if max_start >= float(start_s) - 1e-6:
+                        in_s = _clamp(float(in_s), float(start_s), float(max_start))
+                    else:
+                        # Shouldn't happen (planner chose a valid shot); fall back to baseline timing.
+                        in_s = float(dec.in_s)
+                        speed = float(dec.speed)
+                else:
+                    in_s = max(0.0, float(in_s))
+
+                span_s = float(seg.duration_s) * float(speed)
+
                 # Grade by sampling at the chosen in-point.
                 grade: dict[str, float] | None = None
                 if auto_grade:
@@ -1896,19 +2381,148 @@ def run_folder_edit_pipeline(
                     out_luma: float | None = None
                     out_dark: float | None = None
                     out_rgb: list[float] | None = None
+                    out_luma_std: float | None = None
+                    out_chroma: float | None = None
+                    sample_path: Path | None = None
                     if asset_kind == "video" and asset_path.exists():
                         try:
                             grade_samples_dir.mkdir(parents=True, exist_ok=True)
-                            safe = f"{float(dec.in_s):.3f}".replace(".", "p")
-                            sample_path = grade_samples_dir / f"seg_{seg.id:02d}_t_{safe}.jpg"
-                            if not sample_path.exists():
-                                _extract_frame(video_path=asset_path, at_s=float(dec.in_s), out_path=sample_path, timeout_s=min(timeout_s, 120.0))
-                            out_luma = _luma_mean(sample_path)
-                            out_dark = _dark_frac(sample_path)
-                            out_rgb = _rgb_mean(sample_path)
+                            multi = _truthy_env("FOLDER_EDIT_GRADE_MULTI_SAMPLE", "1")
+                            try:
+                                dur0 = float(asset_meta.get("duration_s") or 0.0) if isinstance(asset_meta.get("duration_s"), (int, float)) else None
+                            except Exception:
+                                dur0 = None
+
+                            def _clamp_t(t_s: float) -> float:
+                                tt = float(max(0.0, t_s))
+                                if dur0 is None:
+                                    return tt
+                                # Keep away from the very end where ffmpeg can fail to extract a frame.
+                                return float(min(tt, max(0.0, float(dur0) - 0.15)))
+
+                            # Sample a few frames across the SOURCE window to reduce noise (e.g., flare, black frames).
+                            times = [float(in_s)]
+                            if multi and float(seg.duration_s) >= 0.25:
+                                times.extend([float(in_s) + float(span_s) * 0.50, float(in_s) + float(span_s) * 0.85])
+                            # De-dupe while preserving order.
+                            seen_t: set[float] = set()
+                            times2: list[float] = []
+                            for t_s in times:
+                                t3 = round(_clamp_t(float(t_s)), 3)
+                                if t3 in seen_t:
+                                    continue
+                                seen_t.add(t3)
+                                times2.append(float(t3))
+
+                            lumas: list[float] = []
+                            darks: list[float] = []
+                            rgbs: list[list[float]] = []
+                            lstds: list[float] = []
+                            chromas: list[float] = []
+                            for t_s in times2:
+                                safe = f"{float(t_s):.3f}".replace(".", "p")
+                                sp = grade_samples_dir / f"seg_{seg.id:02d}_t_{safe}.jpg"
+                                if not sp.exists():
+                                    _extract_frame(video_path=asset_path, at_s=float(t_s), out_path=sp, timeout_s=min(timeout_s, 120.0))
+                                # Keep a debug anchor.
+                                if sample_path is None:
+                                    sample_path = sp
+                                l = _luma_mean(sp)
+                                d = _dark_frac(sp)
+                                r = _rgb_mean(sp)
+                                ls = _luma_std(sp)
+                                c = _chroma_mean(sp)
+                                if isinstance(l, (int, float)):
+                                    lumas.append(float(l))
+                                if isinstance(d, (int, float)):
+                                    darks.append(float(d))
+                                if isinstance(r, list) and len(r) == 3 and all(isinstance(x, (int, float)) for x in r):
+                                    rgbs.append([float(r[0]), float(r[1]), float(r[2])])
+                                if isinstance(ls, (int, float)):
+                                    lstds.append(float(ls))
+                                if isinstance(c, (int, float)):
+                                    chromas.append(float(c))
+
+                            # Central tendency for look match, plus spike-aware tail handling for low-key references.
+                            stats = _robust_frame_stats([sample_path] if isinstance(sample_path, Path) and sample_path.exists() else [])
+                            try:
+                                # Re-run on all extracted sample frames (not just the first).
+                                sample_paths = [grade_samples_dir / f"seg_{seg.id:02d}_t_{f'{float(t_s):.3f}'.replace('.', 'p')}.jpg" for t_s in times2]
+                                stats = _robust_frame_stats([p for p in sample_paths if isinstance(p, Path) and p.exists()])
+                            except Exception:
+                                pass
+
+                            out_luma = stats.get("luma") if isinstance(stats.get("luma"), (int, float)) else _median(lumas)
+                            out_dark = stats.get("dark_frac") if isinstance(stats.get("dark_frac"), (int, float)) else _median(darks)
+                            out_rgb = stats.get("rgb_mean") if isinstance(stats.get("rgb_mean"), list) else (_median_rgb(rgbs) if rgbs else None)
+                            out_luma_std = stats.get("luma_std") if isinstance(stats.get("luma_std"), (int, float)) else _median(lstds)
+                            out_chroma = stats.get("chroma") if isinstance(stats.get("chroma"), (int, float)) else _median(chromas)
+
+                            if _truthy_env("FOLDER_EDIT_GRADE_LOWKEY_SPIKE_HANDLE", "1"):
+                                try:
+                                    lowkey_luma_max = float(_float_env("FOLDER_EDIT_GRADE_LOWKEY_REF_LUMA_MAX", "0.03"))
+                                    lowkey_dark_min = float(_float_env("FOLDER_EDIT_GRADE_LOWKEY_REF_DARK_MIN", "0.93"))
+                                    is_low_key = False
+                                    if isinstance(ref_luma, (int, float)) and float(ref_luma) <= float(lowkey_luma_max):
+                                        is_low_key = True
+                                    if isinstance(ref_dark, (int, float)) and float(ref_dark) >= float(lowkey_dark_min):
+                                        is_low_key = True
+                                    if is_low_key:
+                                        med_l = float(out_luma) if isinstance(out_luma, (int, float)) else None
+                                        max_l = stats.get("luma_max")
+                                        if not isinstance(max_l, (int, float)):
+                                            max_l = stats.get("luma_p75")
+                                        if isinstance(med_l, (int, float)) and isinstance(max_l, (int, float)):
+                                            spike_delta = float(_float_env("FOLDER_EDIT_GRADE_LOWKEY_SPIKE_LUMA_DELTA", "0.08"))
+                                            spike_min = float(_float_env("FOLDER_EDIT_GRADE_LOWKEY_SPIKE_LUMA_MIN", "0.12"))
+                                            if float(max_l) >= float(spike_min) and (float(max_l) - float(med_l)) >= float(spike_delta):
+                                                w = float(_float_env("FOLDER_EDIT_GRADE_LOWKEY_SPIKE_BLEND", "0.35"))
+                                                w = max(0.0, min(1.0, w))
+                                                out_luma = float(med_l) + (float(max_l) - float(med_l)) * float(w)
+
+                                                med_d = float(out_dark) if isinstance(out_dark, (int, float)) else None
+                                                min_d = stats.get("dark_min")
+                                                if not isinstance(min_d, (int, float)):
+                                                    min_d = stats.get("dark_p25")
+                                                dark_delta = float(_float_env("FOLDER_EDIT_GRADE_LOWKEY_SPIKE_DARK_DELTA", "0.10"))
+                                                if isinstance(med_d, (int, float)) and isinstance(min_d, (int, float)) and (float(med_d) - float(min_d)) >= float(dark_delta):
+                                                    out_dark = float(med_d) + (float(min_d) - float(med_d)) * float(w)
+
+                                                # Blend WB toward the brightest frame to reduce "warm flash" spikes.
+                                                rgb_med = out_rgb if isinstance(out_rgb, list) and len(out_rgb) == 3 else None
+                                                rgb_max = stats.get("rgb_at_luma_max")
+                                                if (
+                                                    isinstance(rgb_med, list)
+                                                    and isinstance(rgb_max, list)
+                                                    and len(rgb_max) == 3
+                                                    and all(isinstance(x, (int, float)) for x in rgb_med)
+                                                    and all(isinstance(x, (int, float)) for x in rgb_max)
+                                                ):
+                                                    out_rgb = [
+                                                        float(float(rgb_med[0]) + (float(rgb_max[0]) - float(rgb_med[0])) * float(w)),
+                                                        float(float(rgb_med[1]) + (float(rgb_max[1]) - float(rgb_med[1])) * float(w)),
+                                                        float(float(rgb_med[2]) + (float(rgb_max[2]) - float(rgb_med[2])) * float(w)),
+                                                    ]
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
-                    grade = _compute_eq_grade(ref_luma=ref_luma, ref_dark=ref_dark, out_luma=out_luma, out_dark=out_dark, ref_rgb=ref_rgb, out_rgb=out_rgb)
+                    grade = _compute_eq_grade(
+                        ref_luma=ref_luma,
+                        ref_dark=ref_dark,
+                        out_luma=out_luma,
+                        out_dark=out_dark,
+                        ref_rgb=ref_rgb,
+                        out_rgb=out_rgb,
+                        out_luma_std=out_luma_std,
+                        out_chroma=out_chroma,
+                        ref_frame_path=ref_frame_by_id.get(int(seg.id)),
+                        out_frame_path=sample_path,
+                    )
+                    grade = _smooth_grade_step(prev_segment=prev_seg_for_grade, prev_grade=prev_grade, segment=seg, grade=grade)
+                    if isinstance(grade, dict):
+                        prev_seg_for_grade = seg
+                        prev_grade = grade
 
                 # Stabilization uses motion proxy; prefer shot-level if available.
                 stabilize = False
@@ -1922,8 +2536,8 @@ def run_folder_edit_pipeline(
                         try:
                             seg_shake_p95 = _estimate_shake_jitter_norm_p95(
                                 video_path=asset_path,
-                                start_s=float(dec.in_s),
-                                end_s=float(dec.in_s) + float(seg.duration_s),
+                                start_s=float(in_s),
+                                end_s=float(in_s) + float(span_s),
                             )
                         except Exception:
                             seg_shake_p95 = None
@@ -2017,9 +2631,9 @@ def run_folder_edit_pipeline(
                 _render_segment(
                     asset_path=asset_path,
                     asset_kind=asset_kind,
-                    in_s=dec.in_s,
+                    in_s=in_s,
                     duration_s=seg.duration_s,
-                    speed=dec.speed,
+                    speed=speed,
                     crop_mode=crop_mode,
                     reframe=(md.reframe if md else None),
                     overlay_text=overlay_text,
@@ -2071,9 +2685,9 @@ def run_folder_edit_pipeline(
                         "asset_id": dec.asset_id,
                         "asset_path": str(asset_path),
                         "asset_kind": asset_kind,
-                        "asset_in_s": dec.in_s,
-                        "asset_out_s": float(dec.in_s) + (float(seg.duration_s) * float(dec.speed)),
-                        "speed": dec.speed,
+                        "asset_in_s": in_s,
+                        "asset_out_s": float(in_s) + (float(seg.duration_s) * float(speed)),
+                        "speed": speed,
                         "crop_mode": crop_mode,
                         "reframe": (md.reframe if md else None),
                         "grade": grade,
@@ -2415,6 +3029,8 @@ def run_folder_edit_pipeline(
         segment_paths: list[Path] = []
         timeline_segments: list[dict[str, t.Any]] = []
         fade_tail = _float_env("FOLDER_EDIT_FADE_OUT_S", "0.18")
+        prev_seg_for_grade = None
+        prev_grade: dict[str, float] | None = None
         for idx, seg in enumerate(ref_analysis.segments, start=1):
             if cancel_event.is_set():
                 raise CancelledError("Cancelled during rendering")
@@ -2438,6 +3054,9 @@ def run_folder_edit_pipeline(
                 out_luma: float | None = None
                 out_dark: float | None = None
                 out_rgb: list[float] | None = None
+                out_luma_std: float | None = None
+                out_chroma: float | None = None
+                sample_path: Path | None = None
                 refn = refinement_by_seg_id.get(seg.id)
                 if isinstance(refn, dict):
                     ol = refn.get("chosen_luma")
@@ -2455,18 +3074,63 @@ def run_folder_edit_pipeline(
                     if asset_kind == "video" and asset_path.exists():
                         try:
                             grade_samples_dir.mkdir(parents=True, exist_ok=True)
-                            safe = f"{float(dec.in_s):.3f}".replace(".", "p")
-                            sample_path = grade_samples_dir / f"seg_{seg.id:02d}_t_{safe}.jpg"
-                            if not sample_path.exists():
-                                _extract_frame(
-                                    video_path=asset_path,
-                                    at_s=float(dec.in_s),
-                                    out_path=sample_path,
-                                    timeout_s=min(timeout_s, 120.0),
-                                )
-                            out_luma = out_luma if out_luma is not None else _luma_mean(sample_path)
-                            out_dark = out_dark if out_dark is not None else _dark_frac(sample_path)
-                            out_rgb = out_rgb if out_rgb is not None else _rgb_mean(sample_path)
+                            multi = _truthy_env("FOLDER_EDIT_GRADE_MULTI_SAMPLE", "1")
+                            try:
+                                dur0 = float(asset_meta.get("duration_s") or 0.0) if isinstance(asset_meta.get("duration_s"), (int, float)) else None
+                            except Exception:
+                                dur0 = None
+
+                            def _clamp_t(t_s: float) -> float:
+                                tt = float(max(0.0, t_s))
+                                if dur0 is None:
+                                    return tt
+                                return float(min(tt, max(0.0, float(dur0) - 0.15)))
+
+                            times = [float(dec.in_s)]
+                            if multi and float(seg.duration_s) >= 0.25:
+                                times.extend([float(dec.in_s) + float(seg.duration_s) * 0.50, float(dec.in_s) + float(seg.duration_s) * 0.85])
+                            seen_t: set[float] = set()
+                            times2: list[float] = []
+                            for t_s in times:
+                                t3 = round(_clamp_t(float(t_s)), 3)
+                                if t3 in seen_t:
+                                    continue
+                                seen_t.add(t3)
+                                times2.append(float(t3))
+
+                            lumas: list[float] = []
+                            darks: list[float] = []
+                            rgbs: list[list[float]] = []
+                            lstds: list[float] = []
+                            chromas: list[float] = []
+                            for t_s in times2:
+                                safe = f"{float(t_s):.3f}".replace(".", "p")
+                                sp = grade_samples_dir / f"seg_{seg.id:02d}_t_{safe}.jpg"
+                                if not sp.exists():
+                                    _extract_frame(video_path=asset_path, at_s=float(t_s), out_path=sp, timeout_s=min(timeout_s, 120.0))
+                                l = _luma_mean(sp)
+                                d = _dark_frac(sp)
+                                r = _rgb_mean(sp)
+                                ls = _luma_std(sp)
+                                c = _chroma_mean(sp)
+                                if isinstance(l, (int, float)):
+                                    lumas.append(float(l))
+                                if isinstance(d, (int, float)):
+                                    darks.append(float(d))
+                                if isinstance(r, list) and len(r) == 3 and all(isinstance(x, (int, float)) for x in r):
+                                    rgbs.append([float(r[0]), float(r[1]), float(r[2])])
+                                if isinstance(ls, (int, float)):
+                                    lstds.append(float(ls))
+                                if isinstance(c, (int, float)):
+                                    chromas.append(float(c))
+                                if sample_path is None:
+                                    sample_path = sp
+
+                            out_luma = _median(lumas) if out_luma is None else out_luma
+                            out_dark = _median(darks) if out_dark is None else out_dark
+                            out_rgb = _median_rgb(rgbs) if out_rgb is None else out_rgb
+                            out_luma_std = _median(lstds)
+                            out_chroma = _median(chromas)
                         except Exception:
                             pass
                     elif asset_path.exists():
@@ -2474,7 +3138,22 @@ def run_folder_edit_pipeline(
                         out_dark = out_dark if out_dark is not None else _dark_frac(asset_path)
                         out_rgb = out_rgb if out_rgb is not None else _rgb_mean(asset_path)
 
-                grade = _compute_eq_grade(ref_luma=ref_luma, ref_dark=ref_dark, out_luma=out_luma, out_dark=out_dark, ref_rgb=ref_rgb, out_rgb=out_rgb)
+                grade = _compute_eq_grade(
+                    ref_luma=ref_luma,
+                    ref_dark=ref_dark,
+                    out_luma=out_luma,
+                    out_dark=out_dark,
+                    ref_rgb=ref_rgb,
+                    out_rgb=out_rgb,
+                    out_luma_std=out_luma_std,
+                    out_chroma=out_chroma,
+                    ref_frame_path=ref_frame_by_id.get(int(seg.id)),
+                    out_frame_path=sample_path,
+                )
+                grade = _smooth_grade_step(prev_segment=prev_seg_for_grade, prev_grade=prev_grade, segment=seg, grade=grade)
+                if isinstance(grade, dict):
+                    prev_seg_for_grade = seg
+                    prev_grade = grade
 
             # Optional stabilization + punch-in.
             stabilize = False
@@ -3066,6 +3745,29 @@ def run_folder_edit_pipeline(
                 sid = 0
             if sid <= 0:
                 continue
+
+            chosen_luma = None
+            chosen_dark = None
+            chosen_motion = None
+
+            micro = s.get("micro_editor")
+            if isinstance(micro, dict):
+                ch = micro.get("chosen")
+                if isinstance(ch, dict):
+                    chosen_luma = ch.get("luma")
+                    chosen_dark = ch.get("dark_frac")
+                    chosen_motion = ch.get("motion")
+
+            if chosen_luma is None or chosen_dark is None or chosen_motion is None:
+                refn = s.get("inpoint_refinement")
+                if isinstance(refn, dict):
+                    if chosen_luma is None:
+                        chosen_luma = refn.get("chosen_luma")
+                    if chosen_dark is None:
+                        chosen_dark = refn.get("chosen_dark_frac")
+                    if chosen_motion is None:
+                        chosen_motion = refn.get("chosen_motion")
+
             out.append(
                 {
                     "segment_id": sid,
@@ -3074,8 +3776,20 @@ def run_folder_edit_pipeline(
                     "desired_tags": s.get("desired_tags"),
                     "story_beat": s.get("story_beat"),
                     "transition_hint": s.get("transition_hint"),
+                    # Objective signals (compact): help the critic avoid generic look/timing advice.
+                    "ref_luma": s.get("ref_luma"),
+                    "ref_dark_frac": s.get("ref_dark_frac"),
+                    "ref_rgb_mean": s.get("ref_rgb_mean"),
+                    "stabilize": s.get("stabilize"),
+                    "crop_mode": s.get("crop_mode"),
+                    "speed": s.get("speed"),
+                    "zoom": s.get("zoom"),
+                    "chosen_luma": chosen_luma,
+                    "chosen_dark_frac": chosen_dark,
+                    "chosen_motion": chosen_motion,
                 }
             )
+
         return {"segments": out}
 
     def _symlink_latest_video(iter_root: Path) -> None:
@@ -3172,6 +3886,7 @@ def run_folder_edit_pipeline(
 
     if improve_iters_total > 0:
         try:
+            from .compare_video_critic import PROMPT_VERSION as COMPARE_VIDEO_CRITIC_PROMPT_VERSION
             from .compare_video_critic import critique_compare_video
             from .critic_schema import severity_rank
             from .fix_actions import apply_fix_actions, apply_segment_deltas_to_timeline, apply_transition_deltas
@@ -3298,11 +4013,12 @@ def run_folder_edit_pipeline(
                 # If proxies already exist, still attempt critique.
                 pass
 
+            timeline_summary_for_critic = _timeline_summary_for_critic(timeline_doc)
             critic_res = critique_compare_video(
                 api_key=api_key,
                 model=critic_model,
                 compare_video_path=review_compare,
-                timeline_summary=_timeline_summary_for_critic(timeline_doc),
+                timeline_summary=timeline_summary_for_critic,
                 critic_pro_mode=bool(critic_pro_mode),
                 max_mb=float(critic_max_mb),
                 tmp_dir=(review_dir / "tmp"),
@@ -3312,6 +4028,27 @@ def run_folder_edit_pipeline(
             )
             report = critic_res.report
             (iter_root / "critique.json").write_text(json.dumps(report.to_dict(), indent=2) + "\n", encoding="utf-8")
+
+            # Persist call metadata + the exact compact input pack used for the critic.
+            meta_doc: dict[str, t.Any] = {
+                "prompt_version": str(COMPARE_VIDEO_CRITIC_PROMPT_VERSION),
+                "model_requested": str(critic_res.model_requested),
+                "model_used": (str(critic_res.model_used) if critic_res.model_used else None),
+                "usage": critic_res.usage,
+                "critic_video_meta": critic_res.video_meta,
+                "compare_video_path": str(review_compare.resolve()),
+            }
+            (iter_root / "critique_meta.json").write_text(json.dumps(meta_doc, indent=2) + "\n", encoding="utf-8")
+
+            input_pack: dict[str, t.Any] = {
+                "timeline_summary": timeline_summary_for_critic,
+                "review_paths": {
+                    "reference_review": str(review_ref.resolve()),
+                    "output_review": str(review_out.resolve()),
+                    "compare_review": str(review_compare.resolve()),
+                },
+            }
+            (iter_root / "critic_input_pack.json").write_text(json.dumps(input_pack, indent=2) + "\n", encoding="utf-8")
 
             scores.append(float(report.overall_score))
             if len(scores) >= 2:
@@ -3437,6 +4174,11 @@ def run_folder_edit_pipeline(
                     _ov(sid)["zoom"] = a.get("value")
                 elif typ == "set_grade":
                     _ov(sid)["grade"] = a.get("value")
+                elif typ == "shift_inpoint":
+                    # Apply as a delta at render time (safer across recasts than absolute timestamps).
+                    _ov(sid)["shift_inpoint_s"] = a.get("seconds")
+                elif typ == "set_speed":
+                    _ov(sid)["speed"] = a.get("value")
                 elif typ == "set_fade_out":
                     _ov(sid)["fade_out_s"] = a.get("seconds")
                     _ov(sid)["fade_out_color"] = "black"

@@ -58,6 +58,30 @@ def s3_head(*, region: str, bucket: str, key: str) -> None:
     s3.head_object(Bucket=bucket, Key=key)
 
 
+def s3_delete_prefix(*, region: str, bucket: str, prefix: str) -> int:
+    """
+    Delete all objects under the given prefix. Best-effort; returns the number of deleted objects.
+
+    Notes:
+    - This does not handle versioned delete markers.
+    - Deletion is batched to 1000 keys per request (S3 API limit).
+    """
+    s3 = boto3.client("s3", region_name=region)
+    deleted = 0
+
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        keys = [{"Key": str(obj.get("Key") or "")} for obj in (page.get("Contents") or []) if obj.get("Key")]
+        if not keys:
+            continue
+        for i in range(0, len(keys), 1000):
+            chunk = keys[i : i + 1000]
+            resp = s3.delete_objects(Bucket=bucket, Delete={"Objects": chunk, "Quiet": True})
+            deleted += len(resp.get("Deleted") or [])
+
+    return deleted
+
+
 def submit_batch_job(
     *,
     region: str,
@@ -120,4 +144,3 @@ def sns_publish_apns(
         ("APNS_SANDBOX" if is_sandbox else "APNS"): json.dumps(apns_payload),
     }
     sns.publish(TargetArn=endpoint_arn, MessageStructure="json", Message=json.dumps(msg))
-

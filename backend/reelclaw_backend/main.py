@@ -15,7 +15,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from reelclaw_backend.apple_signin import verify_apple_identity_token
 from reelclaw_backend.auth import JWTAuth, bearer_token
-from reelclaw_backend.aws_services import presign_get, presign_put, s3_head, sns_create_endpoint, submit_batch_job
+from reelclaw_backend.aws_services import (
+    presign_get,
+    presign_put,
+    s3_delete_prefix,
+    s3_head,
+    sns_create_endpoint,
+    submit_batch_job,
+)
 from reelclaw_backend.aws_store import DynamoDeviceStore, DynamoJobStore
 from reelclaw_backend.config import Settings, load_settings
 from reelclaw_backend.storage import DeviceStore, JobStore, TokenStore
@@ -44,12 +51,14 @@ class ReferenceSpec(BaseModel):
     filename: str | None = None
     content_type: str | None = None
     bytes: int | None = None
+    sha256: str | None = None
 
 
 class ClipSpec(BaseModel):
     filename: str
     content_type: str = "application/octet-stream"
     bytes: int = Field(ge=1)
+    sha256: str | None = None
 
 
 class CreateJobRequest(BaseModel):
@@ -58,18 +67,21 @@ class CreateJobRequest(BaseModel):
     reference: ReferenceSpec
     variations: int = 3
     burn_overlays: bool = False
+    director: Literal["code", "gemini", "auto"] | None = None
     clips: list[ClipSpec] = Field(default_factory=list)
 
 
 class UploadTarget(BaseModel):
     s3_key: str | None = None
     upload_url: str
+    already_uploaded: bool = False
 
 
 class ClipUploadTarget(BaseModel):
     clip_id: str
     s3_key: str | None = None
     upload_url: str
+    already_uploaded: bool = False
 
 
 class CreateJobResponse(BaseModel):
@@ -78,14 +90,24 @@ class CreateJobResponse(BaseModel):
     clip_uploads: list[ClipUploadTarget]
 
 
+class DeleteJobResponse(BaseModel):
+    ok: bool
+
+
 class JobStatusResponse(BaseModel):
     job_id: str
     created_at: str | None = None
+    updated_at: str | None = None
+    queued_at: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
     status: str
     stage: str | None = None
     message: str | None = None
     progress_current: int | None = None
     progress_total: int | None = None
+    eta_seconds: int | None = None
+    eta_finish_at: str | None = None
     error_code: str | None = None
     error_detail: str | None = None
 
@@ -93,9 +115,33 @@ class JobStatusResponse(BaseModel):
 class JobSummary(BaseModel):
     job_id: str
     created_at: str | None = None
+    updated_at: str | None = None
     status: str
     stage: str | None = None
     message: str | None = None
+    progress_current: int | None = None
+    progress_total: int | None = None
+    eta_seconds: int | None = None
+    variants_count: int | None = None
+    preview_thumbnail_url: str | None = None
+
+
+class EditsJob(BaseModel):
+    job_id: str
+    created_at: str | None = None
+    updated_at: str | None = None
+    status: str
+    stage: str | None = None
+    message: str | None = None
+    progress_current: int | None = None
+    progress_total: int | None = None
+    eta_seconds: int | None = None
+    eta_finish_at: str | None = None
+    variants: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EditsFeedResponse(BaseModel):
+    jobs: list[EditsJob]
 
 
 class ListJobsResponse(BaseModel):
@@ -144,6 +190,72 @@ def _safe_slug(s: str) -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_utc_iso(s: Any) -> datetime | None:
+    raw = str(s or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            return None
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _eta_for_job(*, job: dict[str, Any], now: datetime) -> tuple[int | None, str | None]:
+    status = str(job.get("status") or "").strip().lower()
+    if status not in {"queued", "running"}:
+        return None, None
+
+    started_at = _parse_utc_iso(job.get("started_at"))
+    queued_at = _parse_utc_iso(job.get("queued_at"))
+    created_at = _parse_utc_iso(job.get("created_at"))
+    t0 = started_at or queued_at or created_at
+    if not t0:
+        return None, None
+
+    elapsed = max(0.0, (now - t0).total_seconds())
+    variations = max(1, int(job.get("variations") or 3))
+    director = str(job.get("director") or "").strip().lower() or "code"
+    multiplier = 1.0
+    if director == "auto":
+        multiplier = 1.3
+    elif director == "gemini":
+        multiplier = 1.6
+
+    expected_total = (120.0 + 120.0 * float(variations)) * float(multiplier)
+
+    progress_current = job.get("progress_current")
+    progress_total = job.get("progress_total")
+    try:
+        pc = int(progress_current) if progress_current is not None else 0
+    except Exception:
+        pc = 0
+    try:
+        pt = int(progress_total) if progress_total is not None else max(1, variations)
+    except Exception:
+        pt = max(1, variations)
+    if pt <= 0:
+        pt = max(1, variations)
+
+    total = expected_total
+    if started_at and pc > 0 and elapsed > 1.0:
+        try:
+            rate_based_total = (elapsed / float(pc)) * float(pt)
+            total = 0.6 * float(rate_based_total) + 0.4 * float(expected_total)
+        except Exception:
+            total = expected_total
+
+    remaining = max(30.0, float(total) - float(elapsed))
+    remaining = min(3600.0, remaining)
+    eta_seconds = int(round(remaining))
+    eta_finish_at = (now + timedelta(seconds=eta_seconds)).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return eta_seconds, eta_finish_at
 
 
 def _job_ttl_seconds(settings: Settings) -> int:
@@ -248,6 +360,7 @@ def _require_job_owner(job_id: str, user_id: str) -> dict[str, Any]:
 
 
 _VARIANT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
+_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
 @app.on_event("startup")
@@ -390,6 +503,19 @@ def _make_s3_key(*, user_id: str, job_id: str, kind: str, filename: str) -> str:
     return f"uploads/{user_id}/{job_id}/clips/{kind}_{safe}"
 
 
+def _make_library_s3_key(*, user_id: str, sha256_hex: str) -> str:
+    return f"library/{user_id}/{sha256_hex}"
+
+
+def _clean_sha256(raw: str | None) -> str | None:
+    s = str(raw or "").strip().lower()
+    if not s:
+        return None
+    if not _SHA256_RE.match(s):
+        raise HTTPException(status_code=400, detail="Invalid sha256 (expected 64 hex characters).")
+    return s
+
+
 @app.post("/v1/jobs", response_model=CreateJobResponse)
 def create_job(body: CreateJobRequest, request: Request, user_id: str = Depends(require_user)) -> CreateJobResponse:
     settings = _get_settings()
@@ -407,6 +533,7 @@ def create_job(body: CreateJobRequest, request: Request, user_id: str = Depends(
             raise HTTPException(status_code=400, detail="reference.url must be http(s).")
         reference: dict[str, Any] = {"type": "url", "url": url}
     else:
+        ref_sha = _clean_sha256(ref.sha256)
         fn = (ref.filename or "").strip()
         ct = (ref.content_type or "").strip() or "application/octet-stream"
         size = int(ref.bytes or 0)
@@ -415,9 +542,12 @@ def create_job(body: CreateJobRequest, request: Request, user_id: str = Depends(
         if size > settings.max_clip_bytes:
             raise HTTPException(status_code=400, detail="reference video too large.")
         reference = {"type": "upload", "filename": fn, "content_type": ct, "bytes": size}
+        if ref_sha:
+            reference["sha256"] = ref_sha
 
     clips: list[dict[str, Any]] = []
     for c in body.clips:
+        clip_sha = _clean_sha256(c.sha256)
         if int(c.bytes) > settings.max_clip_bytes:
             raise HTTPException(status_code=400, detail=f"Clip too large: {c.filename}")
         clips.append(
@@ -426,20 +556,21 @@ def create_job(body: CreateJobRequest, request: Request, user_id: str = Depends(
                 "filename": str(c.filename),
                 "content_type": str(c.content_type or "application/octet-stream"),
                 "bytes": int(c.bytes),
+                "sha256": clip_sha,
                 "uploaded": False,
                 "s3_key": None,
                 "path": None,
             }
         )
 
-    ttl_seconds = _job_ttl_seconds(settings)
     job = _get_jobs().create_job(
         user_id=str(user_id),
         reference=reference,
         variations=variations,
         burn_overlays=bool(body.burn_overlays),
+        director=(str(body.director) if body.director else None),
         clips=clips,
-        ttl_seconds=ttl_seconds,
+        ttl_seconds=None,
     )
     job_id = str(job["job_id"])
 
@@ -451,7 +582,23 @@ def create_job(body: CreateJobRequest, request: Request, user_id: str = Depends(
         # Persist S3 keys.
         updated_ref = dict(reference)
         if updated_ref.get("type") == "upload":
-            s3_key = _make_s3_key(user_id=str(user_id), job_id=job_id, kind="reference", filename=str(updated_ref.get("filename") or "reference.mp4"))
+            ref_sha = _clean_sha256(str(updated_ref.get("sha256") or "").strip() or None)
+            already_uploaded = False
+            if ref_sha:
+                s3_key = _make_library_s3_key(user_id=str(user_id), sha256_hex=ref_sha)
+                try:
+                    s3_head(region=settings.aws_region, bucket=str(settings.uploads_bucket), key=s3_key)
+                    already_uploaded = True
+                except Exception:
+                    already_uploaded = False
+            else:
+                s3_key = _make_s3_key(
+                    user_id=str(user_id),
+                    job_id=job_id,
+                    kind="reference",
+                    filename=str(updated_ref.get("filename") or "reference.mp4"),
+                )
+
             updated_ref["s3_key"] = s3_key
             reference_upload = UploadTarget(
                 s3_key=s3_key,
@@ -462,12 +609,24 @@ def create_job(body: CreateJobRequest, request: Request, user_id: str = Depends(
                     content_type=str(updated_ref.get("content_type") or "application/octet-stream"),
                     expires_in=settings.upload_url_ttl_seconds,
                 ),
+                already_uploaded=already_uploaded,
             )
 
         updated_clips: list[dict[str, Any]] = []
         for clip in clips:
             clip_id = str(clip["clip_id"])
-            s3_key = _make_s3_key(user_id=str(user_id), job_id=job_id, kind=clip_id, filename=str(clip["filename"]))
+            already_uploaded = False
+            clip_sha = _clean_sha256(str(clip.get("sha256") or "").strip() or None)
+            if clip_sha:
+                s3_key = _make_library_s3_key(user_id=str(user_id), sha256_hex=clip_sha)
+                try:
+                    s3_head(region=settings.aws_region, bucket=str(settings.uploads_bucket), key=s3_key)
+                    already_uploaded = True
+                except Exception:
+                    already_uploaded = False
+            else:
+                s3_key = _make_s3_key(user_id=str(user_id), job_id=job_id, kind=clip_id, filename=str(clip["filename"]))
+
             clip2 = dict(clip)
             clip2["s3_key"] = s3_key
             updated_clips.append(clip2)
@@ -482,6 +641,7 @@ def create_job(body: CreateJobRequest, request: Request, user_id: str = Depends(
                         content_type=str(clip2.get("content_type") or "application/octet-stream"),
                         expires_in=settings.upload_url_ttl_seconds,
                     ),
+                    already_uploaded=already_uploaded,
                 )
             )
 
@@ -699,17 +859,61 @@ def start_job(job_id: str, user_id: str = Depends(require_user)) -> dict[str, st
     return {"ok": "true"}
 
 
+@app.delete("/v1/jobs/{job_id}", response_model=DeleteJobResponse)
+def delete_job(job_id: str, user_id: str = Depends(require_user)) -> DeleteJobResponse:
+    settings = _get_settings()
+    job = _require_job_owner(job_id, user_id)
+
+    status = str(job.get("status") or "").strip().lower()
+    # Allow deleting stuck "uploading" jobs (client may have abandoned the upload),
+    # but block deletion while the backend is actively processing.
+    if status in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="Job is still in progress.")
+
+    aws_mode = _is_aws_mode(settings)
+    if aws_mode:
+        # Best-effort cleanup of per-job artifacts. Do not delete library/ assets here.
+        if settings.outputs_bucket:
+            s3_delete_prefix(
+                region=settings.aws_region,
+                bucket=str(settings.outputs_bucket),
+                prefix=f"outputs/{user_id}/{job_id}/",
+            )
+        if settings.uploads_bucket:
+            s3_delete_prefix(
+                region=settings.aws_region,
+                bucket=str(settings.uploads_bucket),
+                prefix=f"uploads/{user_id}/{job_id}/",
+            )
+
+    try:
+        _get_jobs().delete(job_id)
+    except Exception:
+        # If the record is already gone, treat delete as idempotent.
+        pass
+
+    return DeleteJobResponse(ok=True)
+
+
 @app.get("/v1/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job(job_id: str, user_id: str = Depends(require_user)) -> JobStatusResponse:
     job = _require_job_owner(job_id, user_id)
+    now = datetime.now(timezone.utc)
+    eta_seconds, eta_finish_at = _eta_for_job(job=job, now=now)
     return JobStatusResponse(
         job_id=str(job.get("job_id") or job_id),
         created_at=str(job.get("created_at") or "") or None,
+        updated_at=str(job.get("updated_at") or "") or None,
+        queued_at=str(job.get("queued_at") or "") or None,
+        started_at=str(job.get("started_at") or "") or None,
+        finished_at=str(job.get("finished_at") or "") or None,
         status=str(job.get("status") or "queued"),
         stage=job.get("stage"),
         message=job.get("message"),
         progress_current=job.get("progress_current"),
         progress_total=job.get("progress_total"),
+        eta_seconds=eta_seconds,
+        eta_finish_at=eta_finish_at,
         error_code=job.get("error_code"),
         error_detail=job.get("error_detail"),
     )
@@ -717,18 +921,98 @@ def get_job(job_id: str, user_id: str = Depends(require_user)) -> JobStatusRespo
 
 @app.get("/v1/jobs", response_model=ListJobsResponse)
 def list_jobs(user_id: str = Depends(require_user)) -> ListJobsResponse:
+    settings = _get_settings()
+    aws_mode = _is_aws_mode(settings)
+    now = datetime.now(timezone.utc)
+
     jobs = _get_jobs().list_for_user(str(user_id), limit=50)
     out: list[JobSummary] = []
     for j in jobs:
         if not isinstance(j, dict):
             continue
+
+        status = str(j.get("status") or "").strip().lower()
+        if status == "uploading" and int(settings.uploading_job_cleanup_seconds or 0) > 0:
+            t = _parse_utc_iso(j.get("updated_at")) or _parse_utc_iso(j.get("created_at"))
+            if t:
+                age_s = max(0.0, (now - t).total_seconds())
+                if age_s > float(settings.uploading_job_cleanup_seconds):
+                    # Best-effort cleanup. Stuck uploads create UI noise and per-job uploads expire anyway.
+                    job_id = str(j.get("job_id") or "").strip()
+                    if job_id and aws_mode and settings.uploads_bucket:
+                        try:
+                            s3_delete_prefix(
+                                region=settings.aws_region,
+                                bucket=str(settings.uploads_bucket),
+                                prefix=f"uploads/{user_id}/{job_id}/",
+                            )
+                        except Exception:
+                            pass
+                    if job_id:
+                        try:
+                            _get_jobs().delete(job_id)
+                        except Exception:
+                            pass
+                    continue
+
+        eta_seconds, _eta_finish_at = _eta_for_job(job=j, now=now)
+
+        variants_raw = j.get("variants") if isinstance(j.get("variants"), list) else []
+        variants_count: int | None = None
+        preview_thumbnail_url: str | None = None
+        if isinstance(variants_raw, list):
+            variants_count = len(variants_raw)
+
+        if aws_mode and status == "succeeded":
+            best_thumb_key: str | None = None
+            best_score: float | None = None
+            for v in variants_raw:
+                if not isinstance(v, dict):
+                    continue
+                thumb_key = str(v.get("thumb_s3_key") or "").strip()
+                if not thumb_key:
+                    continue
+
+                score: float | None = None
+                try:
+                    score = float(v.get("score")) if v.get("score") is not None else None
+                except Exception:
+                    score = None
+
+                if best_thumb_key is None:
+                    best_thumb_key = thumb_key
+                    best_score = score
+                    continue
+                if score is None:
+                    continue
+                if best_score is None or score > best_score:
+                    best_thumb_key = thumb_key
+                    best_score = score
+
+            if best_thumb_key:
+                try:
+                    preview_thumbnail_url = presign_get(
+                        region=settings.aws_region,
+                        bucket=str(settings.outputs_bucket),
+                        key=best_thumb_key,
+                        expires_in=settings.download_url_ttl_seconds,
+                    )
+                except Exception:
+                    preview_thumbnail_url = None
+
         out.append(
             JobSummary(
                 job_id=str(j.get("job_id") or ""),
                 created_at=str(j.get("created_at") or "") or None,
+                updated_at=str(j.get("updated_at") or "") or None,
                 status=str(j.get("status") or "queued"),
                 stage=j.get("stage"),
                 message=j.get("message"),
+                progress_current=j.get("progress_current"),
+                progress_total=j.get("progress_total"),
+                eta_seconds=eta_seconds,
+                variants_count=variants_count,
+                preview_thumbnail_url=preview_thumbnail_url,
             )
         )
     return ListJobsResponse(jobs=out)

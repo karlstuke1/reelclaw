@@ -11,30 +11,65 @@ struct ReferenceSpec: Codable, Hashable {
     var filename: String?
     var contentType: String?
     var bytes: Int?
+    var sha256: String?
 }
 
 struct ClipSpec: Codable, Hashable {
     let filename: String
     let contentType: String
     let bytes: Int
+    let sha256: String?
+}
+
+enum VariantDirector: String, Codable, CaseIterable, Identifiable, Hashable {
+    case auto
+    case code
+    case gemini
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .auto:
+            return "Auto"
+        case .code:
+            return "Code"
+        case .gemini:
+            return "Gemini"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .auto:
+            return "Try Gemini, fall back to code"
+        case .code:
+            return "Deterministic heuristic director"
+        case .gemini:
+            return "LLM chooses shots (higher cost)"
+        }
+    }
 }
 
 struct CreateJobRequest: Encodable {
     let reference: ReferenceSpec
     let variations: Int
     let burnOverlays: Bool
+    let director: VariantDirector?
     let clips: [ClipSpec]
 }
 
 struct UploadTarget: Decodable, Hashable {
     let s3Key: String?
     let uploadUrl: URL
+    let alreadyUploaded: Bool?
 }
 
 struct ClipUploadTarget: Decodable, Hashable {
     let clipId: String
     let s3Key: String?
     let uploadUrl: URL
+    let alreadyUploaded: Bool?
 }
 
 struct CreateJobResponse: Decodable {
@@ -58,11 +93,17 @@ struct JobStatusResponse: Decodable {
 
     let jobId: String
     let createdAt: Date?
+    let updatedAt: Date?
+    let queuedAt: Date?
+    let startedAt: Date?
+    let finishedAt: Date?
     let status: Status
     let stage: String?
     let message: String?
     let progressCurrent: Int?
     let progressTotal: Int?
+    let etaSeconds: Int?
+    let etaFinishAt: Date?
     let errorCode: String?
     let errorDetail: String?
 }
@@ -74,9 +115,15 @@ struct ListJobsResponse: Decodable {
 struct JobSummaryResponse: Decodable, Identifiable, Hashable {
     let jobId: String
     let createdAt: Date?
+    let updatedAt: Date?
     let status: JobStatusResponse.Status
     let stage: String?
     let message: String?
+    let progressCurrent: Int?
+    let progressTotal: Int?
+    let etaSeconds: Int?
+    let variantsCount: Int?
+    let previewThumbnailUrl: URL?
 
     var id: String { jobId }
 }

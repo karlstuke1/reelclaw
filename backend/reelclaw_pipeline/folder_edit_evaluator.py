@@ -9,7 +9,7 @@ from pathlib import Path
 import typing as t
 
 from .gemini_score_normalize import normalize_judge_result
-from .openrouter_client import OpenRouterError, chat_completions
+from .openrouter_client import OpenRouterError, chat_completions_budgeted
 
 
 def _strip_code_fences(text: str) -> str:
@@ -228,11 +228,12 @@ def evaluate_edit_full_video_compare(
     last_text = ""
     data: dict[str, t.Any] | None = None
     for attempt in range(1, 4):
-        result = chat_completions(
+        result = chat_completions_budgeted(
             api_key=api_key,
             model=model,
             messages=messages,
             temperature=0.0,
+            max_tokens=int(float(os.getenv("FULL_VIDEO_EVAL_MAX_TOKENS", "1600") or 1600)),
             timeout_s=timeout_s,
             site_url=site_url,
             app_name=app_name,
@@ -370,12 +371,12 @@ def evaluate_edit_similarity(
             # First attempt can be slightly creative, but this makes scores noisy. Prefer forcing
             # FOLDER_EDIT_EVAL_TEMPERATURE=0 for deterministic regression testing.
             temp = 0.2 if attempt == 1 else 0.0
-        result = chat_completions(
+        result = chat_completions_budgeted(
             api_key=api_key,
             model=model,
             messages=messages,
             temperature=float(temp),
-            max_tokens=1600,
+            max_tokens=int(float(os.getenv("SEGMENT_EVAL_MAX_TOKENS", "1600") or 1600)),
             timeout_s=timeout_s,
             site_url=site_url,
             app_name=app_name,

@@ -65,8 +65,21 @@ resource "aws_s3_bucket_lifecycle_configuration" "uploads" {
   rule {
     id     = "expire-uploads"
     status = "Enabled"
+    filter {
+      prefix = "uploads/"
+    }
     expiration {
       days = 7
+    }
+  }
+  rule {
+    id     = "expire-library"
+    status = "Enabled"
+    filter {
+      prefix = "library/"
+    }
+    expiration {
+      days = 90
     }
   }
 }
@@ -88,17 +101,6 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "outputs" {
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "outputs" {
-  bucket = aws_s3_bucket.outputs.id
-  rule {
-    id     = "expire-outputs"
-    status = "Enabled"
-    expiration {
-      days = 30
     }
   }
 }

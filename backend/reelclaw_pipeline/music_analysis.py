@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import os
@@ -212,7 +211,19 @@ def _beats_from_bpm(
     return out
 
 
-def _snap_time(
+def _dedupe_times(values: list[float], *, tol_s: float = 1e-3) -> list[float]:
+    if not values:
+        return []
+    values2 = sorted(float(x) for x in values)
+    out = [float(values2[0])]
+    for t_s in values2[1:]:
+        if abs(float(t_s) - float(out[-1])) <= float(tol_s):
+            continue
+        out.append(float(t_s))
+    return out
+
+
+def _simple_snap_time(
     t_s: float,
     *,
     beats: list[dict[str, float]],
@@ -243,15 +254,190 @@ def snap_times(
     onset_tol_s: float = 0.08,
     beat_tol_s: float = 0.12,
 ) -> list[float]:
-    out = [_snap_time(t, beats=beats, onsets=onsets, onset_tol_s=onset_tol_s, beat_tol_s=beat_tol_s) for t in times_s]
-    # Enforce monotonicity / de-dupe.
-    fixed: list[float] = []
-    for t in out:
+    """
+    Snap times to nearby beats/onsets.
+
+    Modes:
+    - dp (default): global dynamic programming that preserves per-segment durations
+      while snapping boundaries to beats/onsets when it is safe.
+    - simple: snap each boundary independently (legacy).
+    """
+    mode = str(os.getenv("MUSIC_SNAP_MODE", "dp") or "dp").strip().lower()
+    if mode not in {"dp", "simple"}:
+        mode = "dp"
+
+    # Always keep start/end stable (prevents accidental global retiming).
+    if not times_s:
+        return []
+    if len(times_s) <= 2:
+        return [float(t) for t in times_s]
+    if not beats and not onsets:
+        return [float(t) for t in times_s]
+
+    # Legacy mode (kept for debugging).
+    if mode == "simple":
+        out0 = [_simple_snap_time(t, beats=beats, onsets=onsets, onset_tol_s=onset_tol_s, beat_tol_s=beat_tol_s) for t in times_s]
+        fixed: list[float] = []
+        for t in out0:
+            tt = float(t)
+            if fixed and tt <= fixed[-1] + 1e-6:
+                tt = fixed[-1] + 1e-3
+            fixed.append(tt)
+        return fixed
+
+    # DP mode: choose a monotonic sequence of snapped boundaries that:
+    # - stays close to original boundaries
+    # - snaps to strong onsets/beats when close
+    # - preserves each segment duration close to the original (prevents drift)
+    orig = [float(t) for t in times_s]
+    n = len(orig)
+    seg_durs = [max(1e-3, float(orig[i + 1] - orig[i])) for i in range(n - 1)]
+
+    # Tunables (kept conservative; deterministic).
+    w_time = float(os.getenv("MUSIC_SNAP_W_TIME", "2.0") or 2.0)
+    w_onset = float(os.getenv("MUSIC_SNAP_W_ONSET", "1.0") or 1.0)
+    w_beat = float(os.getenv("MUSIC_SNAP_W_BEAT", "0.65") or 0.65)
+    w_dur = float(os.getenv("MUSIC_SNAP_W_DUR", "4.0") or 4.0)
+    min_gap = float(os.getenv("MUSIC_SNAP_MIN_GAP_S", "0.03") or 0.03)
+    min_seg = float(os.getenv("MUSIC_SNAP_MIN_SEG_S", "0.25") or 0.25)
+
+    # Candidate times per boundary.
+    # First/last are fixed to original to avoid shifting the entire reel.
+    cand_times: list[list[float]] = []
+    for i, t0 in enumerate(orig):
+        if i == 0 or i == n - 1:
+            cand_times.append([float(t0)])
+            continue
+        cands: list[float] = [float(t0)]
+        if onsets:
+            for o in onsets:
+                try:
+                    tt = float(o.get("t", 0.0))
+                except Exception:
+                    continue
+                if abs(tt - t0) <= float(onset_tol_s):
+                    cands.append(float(tt))
+        if beats:
+            for b in beats:
+                try:
+                    tt = float(b.get("t", 0.0))
+                except Exception:
+                    continue
+                if abs(tt - t0) <= float(beat_tol_s):
+                    cands.append(float(tt))
+        cand_times.append(_dedupe_times(cands, tol_s=1e-3))
+
+    # Map exact candidate times to "alignment strength" (best of onset/beat).
+    # These are bonuses (reduce cost), so they must be bounded.
+    onset_strength_by_t: dict[float, float] = {}
+    for o in onsets:
+        try:
+            tt = round(float(o.get("t", 0.0)), 3)
+            st = float(o.get("strength", 0.0) or 0.0)
+        except Exception:
+            continue
+        onset_strength_by_t[tt] = max(float(onset_strength_by_t.get(tt, 0.0)), float(st))
+    beat_strength_by_t: dict[float, float] = {}
+    for b in beats:
+        try:
+            tt = round(float(b.get("t", 0.0)), 3)
+            st = float(b.get("strength", 0.0) or 0.0)
+        except Exception:
+            continue
+        beat_strength_by_t[tt] = max(float(beat_strength_by_t.get(tt, 0.0)), float(st))
+
+    def node_cost(i: int, t_s: float) -> float:
+        dt = abs(float(t_s) - float(orig[i]))
+        c = float(w_time) * float(dt)
+        tt = round(float(t_s), 3)
+        on = float(onset_strength_by_t.get(tt, 0.0))
+        bt = float(beat_strength_by_t.get(tt, 0.0))
+        if on > 0.0:
+            c -= float(w_onset) * float(min(1.0, on))
+        if bt > 0.0:
+            c -= float(w_beat) * float(min(1.0, bt))
+        return float(c)
+
+    def trans_cost(i: int, t_prev: float, t_cur: float) -> float:
+        # Segment i-1 duration preservation.
+        dur = float(t_cur) - float(t_prev)
+        if dur <= float(min_gap):
+            return float("inf")
+        if dur < float(min_seg):
+            # Big penalty but still allow if no alternative.
+            short_pen = (float(min_seg) - float(dur)) * 6.0
+        else:
+            short_pen = 0.0
+        d0 = float(seg_durs[i - 1])
+        return float(w_dur) * abs(float(dur) - float(d0)) + float(short_pen)
+
+    # DP tables.
+    dp: list[list[float]] = []
+    back: list[list[int]] = []
+    for i in range(n):
+        m = len(cand_times[i])
+        dp.append([float("inf")] * m)
+        back.append([-1] * m)
+
+    # Init boundary 0.
+    dp[0][0] = node_cost(0, cand_times[0][0])
+    back[0][0] = -1
+
+    # DP.
+    for i in range(1, n):
+        for j, t_cur in enumerate(cand_times[i]):
+            base = node_cost(i, t_cur)
+            best_val = float("inf")
+            best_k = -1
+            for k, t_prev in enumerate(cand_times[i - 1]):
+                v = dp[i - 1][k]
+                if not math.isfinite(v):
+                    continue
+                tc = trans_cost(i, t_prev, t_cur)
+                if not math.isfinite(tc):
+                    continue
+                val = float(v) + float(base) + float(tc)
+                if val < best_val:
+                    best_val = float(val)
+                    best_k = int(k)
+            dp[i][j] = float(best_val)
+            back[i][j] = int(best_k)
+
+    # Pick best end.
+    end_j = min(range(len(dp[-1])), key=lambda j: dp[-1][j])
+    if not math.isfinite(dp[-1][end_j]) or back[-1][end_j] < 0:
+        # Fallback to simple snapping if DP fails.
+        out0 = [_simple_snap_time(t, beats=beats, onsets=onsets, onset_tol_s=onset_tol_s, beat_tol_s=beat_tol_s) for t in times_s]
+        fixed: list[float] = []
+        for t in out0:
+            tt = float(t)
+            if fixed and tt <= fixed[-1] + 1e-6:
+                tt = fixed[-1] + 1e-3
+            fixed.append(tt)
+        return fixed
+
+    # Backtrack.
+    snapped_rev: list[float] = []
+    j = int(end_j)
+    for i in reversed(range(n)):
+        snapped_rev.append(float(cand_times[i][j]))
+        j = int(back[i][j])
+        if i > 0 and j < 0:
+            # Safety fallback.
+            snapped_rev = []
+            break
+    if not snapped_rev:
+        return [float(t) for t in times_s]
+    snapped = list(reversed(snapped_rev))
+
+    # Final monotonic enforcement (guards float rounding).
+    fixed2: list[float] = []
+    for t in snapped:
         tt = float(t)
-        if fixed and tt <= fixed[-1] + 1e-6:
-            tt = fixed[-1] + 1e-3
-        fixed.append(tt)
-    return fixed
+        if fixed2 and tt <= fixed2[-1] + 1e-6:
+            tt = fixed2[-1] + 1e-3
+        fixed2.append(tt)
+    return fixed2
 
 
 def analyze_music(
@@ -264,7 +450,7 @@ def analyze_music(
     Analyze an audio track into beats/onsets and a rough energy curve.
 
     This intentionally avoids hard dependencies. If librosa/aubio are available
-    in the environment, we can add them later behind a feature flag. For now
+    in the environment, they can be added later behind a feature flag. For now
     we ship a no-deps baseline that is good enough for beat snapping.
     """
     tmp_wav = output_json_path.with_suffix(".tmp.wav")
@@ -303,14 +489,12 @@ def analyze_music(
                 strength = max(float(o["strength"]) for o in near)
         if strength <= 0.0:
             # Use envelope value near this time.
-            # Find closest env frame.
             if times:
                 j = min(range(len(times)), key=lambda k: abs(float(times[k]) - float(bt)))
                 strength = float(env_n[j]) if j < len(env_n) else 0.0
         beats.append({"i": int(i), "t": float(bt), "strength": float(strength)})
 
     # Rough sections: detect large changes in smoothed energy.
-    # Keep conservative; sections are optional metadata.
     sections: list[dict[str, t.Any]] = []
     if env_n and times:
         w = max(3, int(round(1.0 / (float(hop_size) / float(sr)))))  # ~1s window
@@ -319,20 +503,16 @@ def analyze_music(
             a = max(0, i - w)
             b = min(len(env_n), i + w)
             smooth.append(sum(env_n[a:b]) / max(1, b - a))
-        # Change points where derivative spikes.
         deriv = _diff_pos(smooth)
         change_pts = _peak_pick(values=_normalize(deriv), times=times, threshold=0.35, min_spacing_s=2.0)
         cut_ts = [0.0] + [float(p["t"]) for p in change_pts] + [float(times[-1])]
-        # Map to beats.
         for si in range(len(cut_ts) - 1):
             s0 = cut_ts[si]
             s1 = cut_ts[si + 1]
-            # Estimate beat indices.
             b0 = min(range(len(beats)), key=lambda j: abs(float(beats[j]["t"]) - s0)) if beats else 0
             b1 = min(range(len(beats)), key=lambda j: abs(float(beats[j]["t"]) - s1)) if beats else b0
             if b1 <= b0:
                 continue
-            # Energy as mean smooth in window.
             a = min(range(len(times)), key=lambda j: abs(float(times[j]) - s0))
             b = min(range(len(times)), key=lambda j: abs(float(times[j]) - s1))
             if b <= a:
@@ -351,28 +531,9 @@ def analyze_music(
             "frame_size": int(frame_size),
             "hop_size": int(hop_size),
             "onset_threshold": float(onset_thresh),
+            "snap_mode": str(os.getenv("MUSIC_SNAP_MODE", "dp") or "dp"),
         },
     }
     output_json_path.parent.mkdir(parents=True, exist_ok=True)
     output_json_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
     return doc
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Analyze a music track into beats/onsets (JSON).")
-    ap.add_argument("--audio", required=True, help="Audio or video path")
-    ap.add_argument("--out", required=True, help="Output JSON path")
-    args = ap.parse_args()
-
-    src = Path(args.audio).expanduser().resolve()
-    if not src.exists():
-        raise SystemExit(f"Input not found: {src}")
-    out = Path(args.out).expanduser().resolve()
-    analyze_music(audio_or_video_path=src, output_json_path=out)
-    print(f"Done: {out}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-

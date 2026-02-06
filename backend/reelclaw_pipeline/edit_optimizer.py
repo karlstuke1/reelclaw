@@ -201,8 +201,14 @@ def _slot_cost(
     desired_tags = getattr(segment, "desired_tags", []) or []
     desired_set = {_norm_tag(str(tg)) for tg in desired_tags if _norm_tag(str(tg))}
     # Prefer music-aware energy when available (beat-synced projects).
+    dur_energy = _segment_energy_hint(float(getattr(segment, "duration_s", 1.0) or 1.0))
     me = _safe_float(getattr(segment, "music_energy", None))
-    energy = float(me) if me is not None else _segment_energy_hint(float(getattr(segment, "duration_s", 1.0) or 1.0))
+    if me is not None:
+        # Blend instead of replacing: our no-deps music_energy is a conservative proxy and can
+        # under-report "high-energy" tracks early on. Duration is still a strong cadence prior.
+        energy = _clamp01((0.65 * float(dur_energy)) + (0.35 * _clamp01(float(me))))
+    else:
+        energy = float(dur_energy)
 
     # Emotional arc / intensity target (very lightweight).
     # We keep this conservative: it should nudge, not dominate lighting/tag matching.
@@ -263,6 +269,11 @@ def _slot_cost(
     tag_set = _tag_set(shot)
     overlap = len(desired_set.intersection(tag_set)) if desired_set else 0
     tag_bonus = -0.10 * min(overlap, 6)
+    # If a segment expresses intent (desired_tags) but a shot matches NONE of it, penalize slightly.
+    # This reduces common failures like "random suitcase/dinner shot" sneaking in on lighting alone.
+    tag_miss_pen = 0.0
+    if desired_set and overlap <= 0:
+        tag_miss_pen = float(_float_env("OPT_TAG_MISS_PEN", "0.10"))
 
     # Story-plan preference (optional): if a story planner provided preferred_sequence_group_ids,
     # treat them as a *soft* constraint. We still allow deviation if another shot matches the
@@ -327,6 +338,28 @@ def _slot_cost(
         if float(shake) > float(start):
             shake_pen = min(0.65, (float(shake) - float(start)) * float(slope))
 
+    # Hook/payoff nudges: avoid "boring wide static" openings/closings.
+    #
+    # This is intentionally lightweight so it doesn't override lighting/tag matching.
+    # It tends to fix the common critique: "good match but flat / no intentional hook".
+    impact_pen = 0.0
+    if beat_goal in {"hook", "payoff"}:
+        st0 = str(shot.get("shot_type") or "").strip().lower()
+        tags0 = shot.get("tags") or []
+        tag_text = " ".join(str(x or "").strip().lower() for x in tags0) if isinstance(tags0, list) else ""
+        is_close = ("close" in st0) or ("macro" in st0) or ("detail" in st0) or ("close-up" in tag_text) or ("macro" in tag_text) or ("detail" in tag_text)
+        is_wide = ("wide" in st0) or ("establish" in st0) or ("wide shot" in tag_text) or ("establishing" in tag_text)
+        is_static = ("static" in st0) or ("static shot" in tag_text) or (float(motion_norm) <= float(_float_env("OPT_STATIC_MOTION_MAX", "0.12")))
+
+        if is_close:
+            impact_pen -= float(_float_env("OPT_HOOK_CLOSE_BONUS", "0.06"))
+        if is_wide:
+            impact_pen += float(_float_env("OPT_HOOK_WIDE_PEN", "0.08"))
+        if is_static:
+            impact_pen += float(_float_env("OPT_HOOK_STATIC_PEN", "0.06"))
+        if is_wide and is_static:
+            impact_pen += float(_float_env("OPT_HOOK_WIDE_STATIC_PEN", "0.06"))
+
     arc_pen = 0.0
     arc_w = _float_env("OPT_ARC_W", "0.18")
     if target_intensity is not None and float(arc_w) > 1e-6:
@@ -336,7 +369,7 @@ def _slot_cost(
         shot_intensity = (0.55 * motion_norm) + (0.30 * float(sharp_norm)) + (0.15 * (1.0 - dark_norm))
         arc_pen = abs(float(shot_intensity) - float(target_intensity)) * float(arc_w)
 
-    return float(lighting + color_dist + motion_dist + tag_bonus + text_bonus + sharp_pen + shake_pen + story_bonus + arc_pen)
+    return float(lighting + color_dist + motion_dist + tag_bonus + tag_miss_pen + text_bonus + sharp_pen + shake_pen + story_bonus + arc_pen + impact_pen)
 
 
 def shortlist_shots_for_segment(
@@ -350,21 +383,30 @@ def shortlist_shots_for_segment(
     ref_dark = _safe_float(getattr(segment, "ref_dark_frac", None))
     very_dark = _is_very_dark(ref_luma, ref_dark)
 
+    desired_tags = getattr(segment, "desired_tags", []) or []
+    desired_set = {_norm_tag(str(tg)) for tg in desired_tags if _norm_tag(str(tg))}
+
     seg_dur = float(getattr(segment, "duration_s", 0.0) or 0.0)
     # Motion gating: optionally filter out very static shots for high-energy segments.
-    # This targets the common failure mode where Gemini flags pacing as "too slow/static"
-    # even when the cadence matches, because the chosen shots lack dynamic movement.
+    # This targets the common failure mode where pacing feels "too slow/static" even when
+    # the cadence matches, because the chosen shots lack dynamic movement.
+    #
+    # IMPORTANT: gating can over-filter small libraries (or libraries where motion_score is noisy),
+    # collapsing the candidate pool to a handful of shots and causing repeats. Therefore:
+    # - Default is OFF (soft penalties in _slot_cost still prefer motion match).
+    # - If enabled, we automatically relax it when it would shrink the pool too much.
     motion_gate = _truthy_env("OPT_MOTION_GATE", "0")
-    motion_min_low = _float_env("OPT_MOTION_MIN_LOW", "0.10")
+    motion_min_low = _float_env("OPT_MOTION_MIN_LOW", "0.06")
     # Default tuned to the observed distribution in our fast shot index (p95 ≈ 0.25).
     # Keep this conservative: motion gating is OFF by default and only applies when enabled.
-    motion_min_high = _float_env("OPT_MOTION_MIN_HIGH", "0.25")
+    motion_min_high = _float_env("OPT_MOTION_MIN_HIGH", "0.18")
     energy_th = _float_env("OPT_MOTION_GATE_ENERGY_TH", "0.55")
-    energy = _safe_float(getattr(segment, "music_energy", None))
-    if energy is None:
-        # Fall back to a duration-based energy hint.
-        energy = _segment_energy_hint(seg_dur if seg_dur > 0.0 else float(getattr(segment, "duration_s", 1.0) or 1.0))
-    energy_f = float(energy)
+    dur_energy = _segment_energy_hint(seg_dur if seg_dur > 0.0 else float(getattr(segment, "duration_s", 1.0) or 1.0))
+    me = _safe_float(getattr(segment, "music_energy", None))
+    if me is not None:
+        energy_f = float(_clamp01((0.65 * float(dur_energy)) + (0.35 * _clamp01(float(me)))))
+    else:
+        energy_f = float(_clamp01(float(dur_energy)))
     motion_min = float(motion_min_high if energy_f >= float(energy_th) else motion_min_low)
     if very_dark:
         # Motion estimation is noisier on very dark/low-texture shots; relax slightly.
@@ -377,8 +419,12 @@ def shortlist_shots_for_segment(
         if not pref_set:
             pref_set = None
 
-    preferred: list[dict[str, t.Any]] = []
-    others: list[dict[str, t.Any]] = []
+    # Keep both a motion-gated and a motion-relaxed pool so we can auto-relax when gating
+    # would collapse diversity.
+    preferred_gate: list[dict[str, t.Any]] = []
+    others_gate: list[dict[str, t.Any]] = []
+    preferred_all: list[dict[str, t.Any]] = []
+    others_all: list[dict[str, t.Any]] = []
     strict_pref = _truthy_env("OPT_STRICT_STORY_PREF", "0")
     # Shake gating can easily over-filter when shake_score is noisy; default is OFF.
     shake_gate = _truthy_env("OPT_SHAKE_GATE", "0")
@@ -419,11 +465,12 @@ def shortlist_shots_for_segment(
                 dmax = _safe_float(s.get("dark_frac"))
             if dmax is not None and float(dmax) < float(_float_env("OPT_DARK_GATE_MIN", "0.78")):
                 continue
+        passed_motion = True
         if motion_gate:
             mv = _safe_float(s.get("motion_score"))
             # Only gate when motion is known; keep missing values.
             if mv is not None and float(mv) < float(motion_min):
-                continue
+                passed_motion = False
         if shake_gate:
             sh = _safe_float(s.get("shake_score"))
             # Only apply shake gating when we have an estimate.
@@ -434,10 +481,46 @@ def shortlist_shots_for_segment(
             # Only gate when sharpness is known; keep missing values.
             if sh is not None and float(sh) < float(sharp_min):
                 continue
-        if pref_set is not None and gid and gid in pref_set:
-            preferred.append(s)
+        is_pref = bool(pref_set is not None and gid and gid in t.cast(set[str], pref_set))
+        if is_pref:
+            preferred_all.append(s)
+            if passed_motion:
+                preferred_gate.append(s)
         else:
-            others.append(s)
+            others_all.append(s)
+            if passed_motion:
+                others_gate.append(s)
+
+    # Auto-relax motion gating if it would collapse the pool (prevents repetition collapse).
+    if motion_gate:
+        # Aim for a minimally diverse pool; the ranker will still prefer higher-motion shots.
+        min_pool = int(max(8, min(int(limit), 12)))
+        if (len(preferred_gate) + len(others_gate)) >= int(min_pool):
+            preferred = preferred_gate
+            others = others_gate
+        else:
+            preferred = preferred_all
+            others = others_all
+    else:
+        preferred = preferred_all
+        others = others_all
+
+    # Optional: tag gate. If the segment expresses desired_tags and we have enough tag-overlapping
+    # shots, restrict the candidate pool to those to avoid irrelevant imagery.
+    if desired_set and _truthy_env("OPT_TAG_GATE", "1"):
+        def _has_overlap(row: dict[str, t.Any]) -> bool:
+            try:
+                return bool(desired_set.intersection(_tag_set(row)))
+            except Exception:
+                return False
+
+        pref_hit = [s for s in preferred if _has_overlap(s)]
+        other_hit = [s for s in others if _has_overlap(s)]
+        hits = len(pref_hit) + len(other_hit)
+        min_hits = int(max(8, min(int(limit), _float_env("OPT_TAG_GATE_MIN_HITS", "12"))))
+        if hits >= int(min_hits):
+            preferred = pref_hit
+            others = other_hit
 
     # Rank preferred first, then fill from others if needed. This keeps story-planner influence
     # without becoming brittle (empty candidate sets cause randomness).

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -89,24 +90,27 @@ class JobStore:
         reference: dict[str, Any],
         variations: int,
         burn_overlays: bool,
+        director: str | None = None,
         clips: list[dict[str, Any]],
         ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
         job_id = f"job_{uuid4().hex[:16]}"
         now_iso = _utc_now_iso()
-        ttl: int | None = None
-        if ttl_seconds and int(ttl_seconds) > 0:
-            ttl = _utc_now_epoch() + int(ttl_seconds)
 
         record: dict[str, Any] = {
             "job_id": job_id,
             "user_id": str(user_id),
             "created_at": now_iso,
+            "updated_at": now_iso,
+            "queued_at": None,
+            "started_at": None,
+            "finished_at": None,
             "reference": reference,
             # Back-compat for the local runner which expects a reel url/path string.
             "reference_reel_url": str(reference.get("url") or reference.get("path") or ""),
             "variations": int(variations),
             "burn_overlays": bool(burn_overlays),
+            "director": str(director) if director else None,
             "status": "uploading",
             "stage": "Uploading",
             "message": "Upload clips…",
@@ -118,7 +122,6 @@ class JobStore:
             "clips": clips,
             "variants": [],
             "batch_job_id": None,
-            "ttl": ttl,
         }
         _atomic_write_json(self.job_path(job_id), record)
 
@@ -140,9 +143,38 @@ class JobStore:
         rec = self.get(job_id)
         if not rec:
             raise KeyError(f"job not found: {job_id}")
+
+        # Maintain stable timestamps for client UX (ETA, "last updated", etc.).
+        now_iso = _utc_now_iso()
+        prev_status = str(rec.get("status") or "").strip().lower()
+        next_status = str(fields.get("status") or prev_status).strip().lower()
+
+        if "updated_at" not in fields:
+            fields["updated_at"] = now_iso
+
+        def _set_if_empty(key: str) -> None:
+            cur = str(rec.get(key) or "").strip()
+            if not cur:
+                rec[key] = now_iso
+
+        if "status" in fields and next_status:
+            # Backfill timestamps even if the job started before these fields existed.
+            if next_status == "queued":
+                _set_if_empty("queued_at")
+            elif next_status == "running":
+                _set_if_empty("started_at")
+            elif next_status in {"succeeded", "failed"}:
+                _set_if_empty("finished_at")
+
         rec.update(fields)
         _atomic_write_json(self.job_path(job_id), rec)
         return rec
+
+    def delete(self, job_id: str) -> None:
+        job_dir = self.job_dir(job_id)
+        if not job_dir.exists():
+            return
+        shutil.rmtree(job_dir, ignore_errors=True)
 
     def list_for_user(self, user_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
         """

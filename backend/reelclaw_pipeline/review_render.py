@@ -136,12 +136,27 @@ def render_compare_video(
 
     w = int(max(160, max_w))
     h = int(max(160, max_h))
-    # Ensure both inputs are exactly w x h, then hstack.
+    font_path = _find_font_path()
+    font_arg = f"fontfile={font_path}:" if font_path else ""
+    # Add lightweight labels (and optional timecode) to improve localization for both humans and the critic.
+    base = f"drawtext={font_arg}fontsize=24:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=8:y=20"
+    ref_label = f"{base}:text='REF':x=(w*0.25-text_w/2)"
+    out_label = f"{base}:text='OUT':x=(w*0.75-text_w/2)"
+    burn_tc = os.getenv("REVIEW_COMPARE_BURN_TIMECODE", "1").strip().lower() not in {"0", "false", "no", "off"}
+    timecode = ""
+    if burn_tc:
+        tc_text = "%{pts\\:hms}"
+        timecode = f"drawtext={font_arg}fontsize=18:fontcolor=white:box=1:boxcolor=black@0.45:boxborderw=8:x=(w-text_w)/2:y=h-55:text='{tc_text}'"
+
+    labels = ",".join([ref_label, out_label] + ([timecode] if timecode else []))
+
+    # Ensure both inputs are exactly w x h, then hstack, then label.
     flt = "\n".join(
         [
             f"[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1[rv];",
             f"[1:v]scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1[ov];",
-            "[rv][ov]hstack=inputs=2[v]",
+            "[rv][ov]hstack=inputs=2[v0];",
+            f"[v0]{labels}[v]",
         ]
     )
     cmd: list[str] = [
@@ -180,4 +195,3 @@ def render_compare_video(
         str(out_path),
     ]
     _run(cmd, timeout_s=float(timeout_s))
-

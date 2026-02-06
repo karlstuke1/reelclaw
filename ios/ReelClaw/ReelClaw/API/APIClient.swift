@@ -42,6 +42,10 @@ struct APIClient {
         try await request(method: "GET", path: "/v1/jobs/\(jobId)/variants", body: Optional<EmptyBody>.none)
     }
 
+    func deleteJob(jobId: String) async throws {
+        let _: EmptyResponse = try await request(method: "DELETE", path: "/v1/jobs/\(jobId)", body: Optional<EmptyBody>.none)
+    }
+
     func registerAPNSDevice(deviceToken: String, environment: String) async throws {
         struct Body: Encodable {
             let deviceToken: String

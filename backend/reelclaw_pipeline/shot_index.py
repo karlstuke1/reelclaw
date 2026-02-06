@@ -500,8 +500,27 @@ def build_or_load_shot_index(
     if mode not in {"fast", "scene"}:
         mode = "fast"
 
+    # Optional cap: for huge libraries, building a scene-level shot index for *all* assets can be
+    # prohibitively slow. This env var allows local benchmarks / power-users to cap the number of
+    # videos indexed deterministically (by sorted asset path).
+    max_videos = 0
+    try:
+        max_videos = int(float(os.getenv("SHOT_INDEX_MAX_VIDEOS", "0") or 0))
+    except Exception:
+        max_videos = 0
+    max_videos = int(max(0, max_videos))
+    # If the cap is >= total videos, treat as "all" so we don't create redundant cache dirs
+    # (e.g., cap80 when the folder only has 30 videos).
+    try:
+        total_videos = sum(1 for a in assets if isinstance(a, dict) and a.get("kind") == "video")
+    except Exception:
+        total_videos = 0
+    if int(max_videos) > 0 and int(total_videos) > 0 and int(max_videos) >= int(total_videos):
+        max_videos = 0
+
     folder_id = folder_cache_key(Path(source_folder))
-    out_dir = cache_dir / f"{folder_id}_{mode}"
+    cap_key = f"cap{max_videos}" if max_videos > 0 else "all"
+    out_dir = cache_dir / f"{folder_id}_{mode}_{cap_key}"
     out_dir.mkdir(parents=True, exist_ok=True)
     shots_path = out_dir / "shot_index.json"
     thumbs_dir = out_dir / "shot_thumbs"
@@ -524,6 +543,7 @@ def build_or_load_shot_index(
         "shot_group_span_s": float(group_span_s),
         "shot_thumb_width": int(thumb_w),
         "shot_thumb_count": int(thumb_count),
+        "max_videos": int(max_videos),
         # Fast-mode params (still part of signature so switching modes is safe).
         "shot_window_s": float(os.getenv("SHOT_WINDOW_S", "6.0")),
         "shot_fast_windows": int(max(3, min(9, float(os.getenv("SHOT_FAST_WINDOWS", "3"))))),
@@ -606,6 +626,9 @@ def build_or_load_shot_index(
     shot_rows: list[dict[str, t.Any]] = []
     asset_sigs: dict[str, dict[str, t.Any]] = {}
     video_assets = [a for a in assets if a.get("kind") == "video"]
+    if max_videos > 0 and len(video_assets) > max_videos:
+        video_assets.sort(key=lambda a: str(a.get("path") or ""))
+        video_assets = video_assets[: int(max_videos)]
     total_videos = len(video_assets)
 
     workers = int(max(1, min(6, float(os.getenv("SHOT_INDEX_WORKERS", "2")))))
@@ -837,6 +860,37 @@ def build_or_load_shot_index(
                 row.update(info)
 
     _apply_tags()
+
+    # Inherit coarse semantic tags from the *asset-level* tag cache (cheap) so the pro pipeline can
+    # retain editorial intelligence even when SHOT_TAGGING=0.
+    #
+    # NOTE: This is an intentionally conservative merge: shot-level tags (if present) win.
+    try:
+        asset_cache_env = str(os.getenv("FOLDER_EDIT_TAG_CACHE_PATH", "") or "").strip()
+        asset_cache_path = Path(asset_cache_env).expanduser().resolve() if asset_cache_env else (Path("Outputs") / "_asset_tag_cache.json").resolve()
+        asset_tags: dict[str, t.Any] = {}
+        if asset_cache_path.exists():
+            try:
+                doc = json.loads(asset_cache_path.read_text(encoding="utf-8", errors="replace") or "{}")
+                asset_tags = t.cast(dict[str, t.Any], (doc.get("tags") or {})) if isinstance(doc, dict) else {}
+            except Exception:
+                asset_tags = {}
+        if isinstance(asset_tags, dict) and asset_tags:
+            for row in shot_rows:
+                aid = str(row.get("asset_id") or "").strip()
+                info = asset_tags.get(aid)
+                if not aid or not isinstance(info, dict):
+                    continue
+                # Only fill when missing/empty so true shot tags can override.
+                if not str(row.get("description") or "").strip() and isinstance(info.get("description"), str):
+                    row["description"] = str(info.get("description") or "").strip()
+                if (not isinstance(row.get("tags"), list) or not row.get("tags")) and isinstance(info.get("tags"), list):
+                    row["tags"] = [str(x) for x in (info.get("tags") or []) if str(x).strip()][:24]
+                for k in ("shot_type", "setting", "mood"):
+                    if not str(row.get(k) or "").strip() and isinstance(info.get(k), str):
+                        row[k] = str(info.get(k) or "").strip()
+    except Exception:
+        pass
 
     do_tag = bool(api_key and model) and os.getenv("SHOT_TAGGING", "1").strip().lower() not in {"0", "false", "no", "off"}
     if do_tag:

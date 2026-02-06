@@ -11,6 +11,8 @@ FIX_ACTION_TYPES = (
     "set_crop_mode",
     "set_zoom",
     "set_grade",
+    "shift_inpoint",
+    "set_speed",
     "set_fade_out",
     "set_overlay_text",
 )

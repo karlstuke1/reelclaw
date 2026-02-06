@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import time
 import typing as t
 import urllib.error
@@ -52,14 +53,32 @@ def _extract_content(response_json: dict[str, t.Any]) -> str:
     content = message.get("content")
     if isinstance(content, str):
         return content
+    # Some providers return response_format JSON as an object instead of a string.
+    if isinstance(content, dict):
+        try:
+            return json.dumps(content, ensure_ascii=True)
+        except Exception:
+            return str(content)
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
             if not isinstance(item, dict):
                 continue
-            if item.get("type") == "text" and isinstance(item.get("text"), str):
-                parts.append(item["text"])
+            # Providers vary: sometimes type is "text", sometimes "output_text", etc.
+            if isinstance(item.get("text"), str) and item.get("text"):
+                parts.append(t.cast(str, item["text"]))
+                continue
+            # Some providers embed JSON parts directly.
+            if item.get("type") == "json" and isinstance(item.get("json"), dict):
+                try:
+                    parts.append(json.dumps(item["json"], ensure_ascii=True))
+                except Exception:
+                    parts.append(str(item["json"]))
         return "\n".join(p for p in parts if p.strip()).strip()
+    # Some OpenRouter-compatible responses use a separate refusal field.
+    refusal = message.get("refusal")
+    if isinstance(refusal, str) and refusal.strip():
+        return refusal.strip()
     return ""
 
 
@@ -168,3 +187,86 @@ def chat_completions(
             time.sleep(retry_delay_s * attempt)
 
     raise OpenRouterError(str(last_error) if last_error else "Unknown OpenRouter error")
+
+
+_AFFORD_RE = re.compile(r"requested up to\\s+(\\d+)\\s+tokens,\\s+but can only afford\\s+(\\d+)", re.IGNORECASE)
+
+
+def _parse_affordable_max_tokens(err_text: str) -> int | None:
+    """
+    Best-effort parse for OpenRouter 402 "can only afford N tokens" errors.
+    Returns the affordable max_tokens value when present.
+    """
+    s = str(err_text or "")
+    m = _AFFORD_RE.search(s)
+    if not m:
+        return None
+    try:
+        afford = int(m.group(2))
+    except Exception:
+        return None
+    if afford <= 0:
+        return None
+    return afford
+
+
+def chat_completions_budgeted(
+    *,
+    api_key: str,
+    model: str,
+    messages: list[dict[str, t.Any]],
+    temperature: float = 0.4,
+    max_tokens: int | None = None,
+    timeout_s: float = 90.0,
+    site_url: str | None = None,
+    app_name: str | None = None,
+    modalities: list[str] | None = None,
+    reasoning: dict[str, t.Any] | None = None,
+    include_reasoning: bool | None = None,
+    extra_body: dict[str, t.Any] | None = None,
+    retries: int = 3,
+    retry_delay_s: float = 2.0,
+    min_tokens: int = 256,
+) -> OpenRouterChatResult:
+    """
+    Wrapper around chat_completions that auto-retries on 402 "can only afford N tokens" errors
+    by reducing max_tokens. This prevents hard-failing pro pipelines when the account's credit
+    is low, while keeping deterministic temperature=0 behavior intact.
+    """
+    mt = int(max_tokens) if max_tokens is not None else None
+    for attempt in range(1, 4):
+        try:
+            return chat_completions(
+                api_key=api_key,
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=mt,
+                timeout_s=timeout_s,
+                site_url=site_url,
+                app_name=app_name,
+                modalities=modalities,
+                reasoning=reasoning,
+                include_reasoning=include_reasoning,
+                extra_body=extra_body,
+                retries=retries,
+                retry_delay_s=retry_delay_s,
+            )
+        except OpenRouterError as e:
+            msg = str(e)
+            if "HTTP 402" not in msg or mt is None:
+                raise
+            afford = _parse_affordable_max_tokens(msg)
+            if afford is not None:
+                mt2 = int(max(min_tokens, int(float(afford) * 0.88)))
+            else:
+                mt2 = int(max(min_tokens, int(float(mt) * 0.85)))
+            if mt2 >= int(mt):
+                # Can't reduce further in a meaningful way.
+                raise
+            mt = mt2
+            if attempt >= 3:
+                raise
+            time.sleep(0.4 * attempt)
+
+    raise OpenRouterError("chat_completions_budgeted failed unexpectedly")

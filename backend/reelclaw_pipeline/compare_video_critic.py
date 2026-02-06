@@ -12,13 +12,22 @@ from .openrouter_client import OpenRouterError, chat_completions, normalize_mode
 from .video_proxy import encode_video_data_url, ensure_inlineable_video
 
 
+PROMPT_VERSION = "compare_video_critic_v2_2026-02-06"
+
+
 def _reasoning_param() -> dict[str, t.Any]:
-    effort_env = os.getenv("REASONING_EFFORT", "").strip().lower()
+    # Keep critic calls cheap and avoid truncating the JSON output due to huge reasoning token use.
+    # Gemini endpoints can still consume "reasoning tokens" even when include_reasoning=false.
+    # Do NOT inherit REASONING_EFFORT; analysis calls benefit from it, but critic calls must
+    # prioritize returning complete JSON without truncation.
+    effort_env = os.getenv("CRITIC_REASONING_EFFORT", "").strip().lower()
+    if not effort_env:
+        return {"effort": "minimal"}
     if effort_env == "xhigh":
         effort_env = "high"
     if effort_env in {"none", "minimal", "low", "medium", "high"}:
         return {"effort": effort_env}
-    return {"effort": "high"}
+    return {"effort": "minimal"}
 
 
 def _strip_code_fences(text: str) -> str:
@@ -87,6 +96,9 @@ def _build_system_prompt(*, critic_pro_mode: bool) -> str:
             "- If REFERENCE is shaky, OUTPUT can match it and still have low stability.",
             "Hard constraint: if subscores.stability <= 2, overall_score MUST be <= 5. If subscores.stability <= 1, overall_score MUST be <= 3.",
             "",
+            "Timing rule:",
+            "- Use shift_inpoint / set_speed SPARINGLY to remove dead air, tighten late cuts, or match energy. Prefer small moves.",
+            "",
             "Return ONLY strict JSON with this exact schema (no extra keys):",
             "{",
             '  "version": 1,',
@@ -115,11 +127,15 @@ def _build_system_prompt(*, critic_pro_mode: bool) -> str:
             "",
             "Constraints:",
             "- Keep outputs short to avoid truncation.",
+            "- segments: include ONLY the most important segments (prefer med/high). HARD CAP: 8 segment objects.",
+            "- segments[].issues: max 3 items. segments[].suggestions: max 3 items. Each string <= 90 chars.",
+            "- lane_a_actions: max 6 actions total.",
+            "- transition_deltas: max 4 boundaries total.",
             "- lane_b_deltas MUST modify at most 2 segments total (pick highest severity).",
             "- segment_scores: include ALL segments shown if possible. Keep as numeric only (no extra strings).",
             "- desired_tags_add/remove: <=8 tags each, lowercase.",
             "- overlay_text_rewrite and lane_a set_overlay_text: max 2 lines, max 26 chars/line.",
-            "- lane_a_actions allowed types: set_stabilize, set_crop_mode(center|top|bottom|face|smart), set_zoom(1.0..1.25), set_grade, set_fade_out(0..0.5), set_overlay_text.",
+            "- lane_a_actions allowed types: set_stabilize, set_crop_mode(center|top|bottom|face|smart), set_zoom(1.0..1.25), set_grade, shift_inpoint(seconds=-0.60..+0.60), set_speed(value=0.85..1.25), set_fade_out(0..0.5), set_overlay_text.",
             pro_line,
         ]
     ).strip()
@@ -132,21 +148,56 @@ def _build_user_text(*, niche: str, vibe: str, timeline_summary: dict[str, t.Any
         f"Target niche/topic: {' '.join((niche or '').split()) or 'N/A'}",
         f"Vibe: {vibe}",
         "",
-        "Timeline summary (for labels/intent only):",
+        "Timeline summary (for labels/intent + numeric signals only):",
     ]
+
+    def sf(x: t.Any, *, digits: int = 3) -> str:
+        try:
+            v = float(x)
+        except Exception:
+            return "-"
+        if digits <= 0:
+            return str(int(round(v)))
+        return f"{v:.{digits}f}"
+
     if isinstance(segs, list):
         for s in segs[:12]:
             if not isinstance(s, dict):
                 continue
             sid = s.get("segment_id")
+            try:
+                sid_i = int(sid)
+            except Exception:
+                continue
             beat = str(s.get("beat_goal") or "")
-            overlay = str(s.get("overlay_text") or "")
-            tags = s.get("desired_tags") if isinstance(s.get("desired_tags"), list) else []
+            overlay = str(s.get("overlay_text") or "").replace("\n", " ").strip()
+            if len(overlay) > 40:
+                overlay = overlay[:37] + "..."
+            tags0 = s.get("desired_tags") if isinstance(s.get("desired_tags"), list) else []
+            tags = [str(x).strip().lower() for x in tags0 if str(x).strip()][:6]
             hint = str(s.get("transition_hint") or "")
             sb = str(s.get("story_beat") or "")
             # Keep one-line summaries.
-            line = f"S{int(sid):02d} beat={beat} overlay={overlay!r} tags={tags} hint={hint!r} story_beat={sb!r}"
-            lines.append(line[:240])
+            tags_s = "|".join(tags) if tags else "-"
+            story_s = sb[:48] + ("..." if len(sb) > 48 else "") if sb else "-"
+            overlay_s = overlay or "-"
+            hint_s = hint or "-"
+            rl = sf(s.get("ref_luma"), digits=3)
+            rd = sf(s.get("ref_dark_frac"), digits=3)
+            spd = sf(s.get("speed"), digits=2)
+            zm = sf(s.get("zoom"), digits=2)
+            stab = "1" if bool(s.get("stabilize")) else "0"
+            crop = str(s.get("crop_mode") or "-")
+            cl = sf(s.get("chosen_luma"), digits=3)
+            cd = sf(s.get("chosen_dark_frac"), digits=3)
+            cm = sf(s.get("chosen_motion"), digits=3)
+            line = (
+                f"S{sid_i:02d} beat={beat or '-'} hint={hint_s} "
+                f"rL={rl} rD={rd} spd={spd} z={zm} stab={stab} crop={crop} "
+                f"cL={cl} cD={cd} cM={cm} "
+                f"tags={tags_s} overlay={overlay_s} story={story_s}"
+            )
+            lines.append(line[:320])
     return "\n".join(lines).strip()
 
 
@@ -194,14 +245,14 @@ def critique_compare_video(
             model=model_norm,
             messages=messages,
             temperature=0.0,
-            max_tokens=1600,
+            max_tokens=3000,
             timeout_s=float(timeout_s),
             site_url=site_url,
             app_name=app_name,
             reasoning=_reasoning_param(),
+            include_reasoning=False,
             retries=2,
             retry_delay_s=1.5,
-            extra_body={"response_format": {"type": "json_object"}},
         )
         last_text = (result.content or "").strip()
         last_usage = result.usage

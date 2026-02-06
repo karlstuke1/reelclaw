@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 import typing as t
 
-import joblib  # type: ignore
+import warnings
+
+try:  # pragma: no cover - optional dep
+    import joblib  # type: ignore
+except Exception:  # pragma: no cover - optional dep
+    joblib = None  # type: ignore[assignment]
 
 
 def _clip(x: float, lo: float, hi: float) -> float:
@@ -20,6 +25,8 @@ class GeminiGrader:
 
     @staticmethod
     def load(root: Path) -> "GeminiGrader":
+        if joblib is None:  # pragma: no cover - optional dep
+            raise ModuleNotFoundError("joblib is required to load learned graders (pip install joblib)")
         root = root.expanduser().resolve()
         meta_path = root / "meta.json"
         if not meta_path.exists():
@@ -30,6 +37,14 @@ class GeminiGrader:
             raise ValueError("meta.json missing feature_names")
 
         models: dict[str, t.Any] = {}
+        # Avoid noisy warnings when sklearn versions differ across machines. Models remain
+        # best-effort; training should align versions, but prediction shouldn't spam logs.
+        try:  # pragma: no cover - optional dep
+            from sklearn.exceptions import InconsistentVersionWarning  # type: ignore
+
+            warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+        except Exception:
+            pass
         for item in meta.get("models") or []:
             if not isinstance(item, dict):
                 continue

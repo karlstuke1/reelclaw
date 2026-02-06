@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 _VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
@@ -21,7 +22,17 @@ def _run(cmd: list[str], *, timeout_s: float) -> None:
         raise RuntimeError(f"Command failed (exit {result.returncode}): {' '.join(cmd)}\n{tail}")
 
 
-def _maybe_write_cookies_file(output_dir: Path) -> Path | None:
+def _is_instagram_url(url: str) -> bool:
+    try:
+        host = (urlparse(str(url)).hostname or "").strip().lower()
+    except Exception:
+        host = ""
+    if not host:
+        return False
+    return host == "instagram.com" or host.endswith(".instagram.com")
+
+
+def _maybe_write_cookies_file(output_dir: Path, *, required: bool = False) -> Path | None:
     """
     Return a path to a Netscape-format cookies.txt file if configured.
 
@@ -52,7 +63,27 @@ def _maybe_write_cookies_file(output_dir: Path) -> Path | None:
                 sm = boto3.client("secretsmanager", region_name=region)
                 resp = sm.get_secret_value(SecretId=secret_id)
                 raw_b64 = str(resp.get("SecretString") or "").strip()
-            except Exception:
+                if not raw_b64:
+                    if required:
+                        raise RuntimeError(
+                            f"Cookies secret is empty: {secret_id}. Set it to a Netscape cookies.txt (raw or base64)."
+                        )
+                    return None
+            except Exception as exc:
+                if required:
+                    exc_name = type(exc).__name__
+                    if exc_name == "ResourceNotFoundException":
+                        raise RuntimeError(
+                            f"Cookies secret has no value set (AWSCURRENT missing): {secret_id}. "
+                            "Set it to a Netscape cookies.txt (raw or base64)."
+                        ) from exc
+                    if exc_name == "AccessDeniedException":
+                        raise RuntimeError(
+                            f"Access denied reading cookies secret {secret_id}. Verify Batch IAM role has secretsmanager:GetSecretValue."
+                        ) from exc
+                    raise RuntimeError(
+                        f"Failed to read cookies secret {secret_id}. Verify Batch role permissions and secret value. ({exc_name})"
+                    ) from exc
                 return None
 
         if not raw_b64:
@@ -65,14 +96,20 @@ def _maybe_write_cookies_file(output_dir: Path) -> Path | None:
             try:
                 data = base64.b64decode(raw_b64.encode("utf-8"), validate=False)
             except Exception:
+                if required:
+                    raise RuntimeError("Cookies secret was not valid base64 and did not look like raw Netscape cookies.txt.")
                 return None
             if not data:
+                if required:
+                    raise RuntimeError("Cookies secret decoded to an empty payload.")
                 return None
             try:
                 raw_text = data.decode("utf-8", errors="replace")
             except Exception:
                 return None
             if not raw_text.strip():
+                if required:
+                    raise RuntimeError("Cookies secret decoded to an empty cookies.txt.")
                 return None
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -111,12 +148,20 @@ def download_reel(url: str, *, output_dir: Path, timeout_s: float = 180.0) -> Pa
     # but fall back to "best" if the source doesn't offer MP4.
     fmt = os.getenv("YTDLP_FORMAT", "").strip() or "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
 
-    cookies_file = _maybe_write_cookies_file(output_dir)
+    secret_id = os.getenv("REELCLAW_YTDLP_COOKIES_SECRET_ID", "").strip() or os.getenv("YTDLP_COOKIES_SECRET_ID", "").strip()
+    cookies_required = _is_instagram_url(url) and bool(secret_id)
+    cookies_file = _maybe_write_cookies_file(output_dir, required=cookies_required)
 
     cmd = [
         ytdlp,
         "--no-playlist",
         "--no-progress",
+        "--retries",
+        os.getenv("YTDLP_RETRIES", "").strip() or "3",
+        "--extractor-retries",
+        os.getenv("YTDLP_EXTRACTOR_RETRIES", "").strip() or "3",
+        "--fragment-retries",
+        os.getenv("YTDLP_FRAGMENT_RETRIES", "").strip() or "3",
     ]
     if cookies_file is not None:
         cmd += ["--cookies", str(cookies_file)]

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import typing as t
 
-from .openrouter_client import OpenRouterError, chat_completions
+from .openrouter_client import OpenRouterError, chat_completions_budgeted
 
 
 def _strip_code_fences(text: str) -> str:
@@ -630,12 +630,12 @@ def plan_story_plans(
     temps = [0.25, 0.10]
     last_text = ""
     for temp in temps:
-        result = chat_completions(
+        result = chat_completions_budgeted(
             api_key=api_key,
             model=model,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}],
             temperature=float(temp),
-            max_tokens=2400,
+            max_tokens=int(float(os.getenv("STORY_PLANNER_MAX_TOKENS", "2400") or 2400)),
             timeout_s=timeout_s,
             site_url=site_url,
             app_name=app_name,
@@ -665,7 +665,7 @@ def plan_story_plans(
             f">= {min_unique_groups} unique first-choice group IDs, >= {min_unique_assets} unique first-choice asset_id, "
             f"AND at least one repeated first-choice group (chapter continuity), <= {max_group_reuse} reuse, no 4+ consecutive repeats, and cover all segments."
         )
-        result = chat_completions(
+        result = chat_completions_budgeted(
             api_key=api_key,
             model=model,
             messages=[
@@ -674,7 +674,7 @@ def plan_story_plans(
                 {"role": "user", "content": fix_msg},
             ],
             temperature=0.1,
-            max_tokens=2400,
+            max_tokens=int(float(os.getenv("STORY_PLANNER_MAX_TOKENS", "2400") or 2400)),
             timeout_s=timeout_s,
             site_url=site_url,
             app_name=app_name,

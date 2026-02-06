@@ -9,8 +9,8 @@ struct MainView: View {
                 .tabItem { Label("Create", systemImage: "wand.and.stars") }
                 .tag(AppTab.create)
 
-            JobsView()
-                .tabItem { Label("Jobs", systemImage: "clock") }
+            EditsView()
+                .tabItem { Label("My Edits", systemImage: "play.rectangle.on.rectangle") }
                 .tag(AppTab.jobs)
 
             SettingsView()

@@ -27,6 +27,9 @@ struct ContentView: View {
     @State private var burnOverlays: Bool = false
     @State private var compressBeforeUpload: Bool = true
     @State private var variations: Int = 3
+    @State private var director: VariantDirector = .code
+    @State private var showAdvanced: Bool = false
+    @State private var submitStatus: String?
 
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var clipSlots: [PickedClip?] = []
@@ -52,13 +55,18 @@ struct ContentView: View {
                     clipsSection
                     optionsSection
                     errorSection
-                    submitSection
                 }
                 .padding()
+            }
+            .safeAreaInset(edge: .bottom) {
+                submitBar
             }
             .navigationTitle("Create")
             .navigationDestination(for: String.self) { jobId in
                 JobProgressView(jobId: jobId)
+            }
+            .sheet(isPresented: $showAdvanced) {
+                advancedSheet
             }
         }
         .task(id: pickerItems) {
@@ -177,16 +185,22 @@ struct ContentView: View {
     }
 
     private var optionsSection: some View {
-        GroupBox("Options") {
-            VStack(alignment: .leading, spacing: 12) {
-                Toggle("Burn captions (experimental)", isOn: $burnOverlays)
-                Toggle("Compress videos before upload", isOn: $compressBeforeUpload)
+        GroupBox("Advanced") {
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    showAdvanced = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Label("Edit settings", systemImage: "slider.horizontal.3")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(isSubmitting)
 
-                Stepper("Variations: \(variations)", value: $variations, in: 1...10, step: 1)
-                    .disabled(isSubmitting)
-                    .accessibilityIdentifier("variations_stepper")
-
-                Text("Tip: keep variations low while testing to save time and cost.")
+                Text(advancedSummaryText)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -202,22 +216,109 @@ struct ContentView: View {
         }
     }
 
-    private var submitSection: some View {
-        Button {
-            Task { await submit() }
-        } label: {
-            if isSubmitting {
-                HStack {
-                    Spacer()
-                    ProgressView()
-                    Spacer()
+    private var advancedSummaryText: String {
+        let edits = "\(variations) edit" + (variations == 1 ? "" : "s")
+        let compress = compressBeforeUpload ? "Compress on" : "Compress off"
+        let captions = burnOverlays ? "Burn captions on" : "Burn captions off"
+        return "\(edits) • \(director.title) • \(compress) • \(captions)"
+    }
+
+    private var createEstimateText: String {
+        let multiplier: Double
+        switch director {
+        case .code:
+            multiplier = 1.0
+        case .auto:
+            multiplier = 1.3
+        case .gemini:
+            multiplier = 1.6
+        }
+
+        let expectedSeconds = (120.0 + 120.0 * Double(variations)) * multiplier
+        let lo = max(1, Int(round((expectedSeconds * 0.8) / 60.0)))
+        let hi = max(lo, Int(round((expectedSeconds * 1.2) / 60.0)))
+        return "Est. \(lo)–\(hi) min"
+    }
+
+    private var submitBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                Task { await submit() }
+            } label: {
+                if isSubmitting {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text(submitStatus?.isEmpty == false ? submitStatus! : "Working…")
+                            .font(.headline)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 2)
+                } else {
+                    Text("Generate \(variations) edit\(variations == 1 ? "" : "s")")
+                        .frame(maxWidth: .infinity)
                 }
-            } else {
-                Text("Generate \(variations) variation\(variations == 1 ? "" : "s")")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isSubmitting || isImportingClips || readyClips.isEmpty)
+
+            if !isSubmitting {
+                Text(createEstimateText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
-        .buttonStyle(.borderedProminent)
-        .disabled(isSubmitting || isImportingClips || readyClips.isEmpty)
+        .padding(12)
+        .background(.ultraThinMaterial)
+    }
+
+    private var advancedSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Edits") {
+                    Stepper("Edits: \(variations)", value: $variations, in: 1...10, step: 1)
+                        .disabled(isSubmitting)
+                        .accessibilityIdentifier("variations_stepper")
+                }
+
+                Section("Director") {
+                    Picker("Director", selection: $director) {
+                        ForEach(VariantDirector.allCases) { d in
+                            Text(d.title).tag(d)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(isSubmitting)
+
+                    Text(director.subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Media") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Compress videos before upload (recommended)", isOn: $compressBeforeUpload)
+                            .disabled(isSubmitting)
+                        Text("Faster uploads and fewer failures. Slightly lower quality.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Toggle("Burn overlay captions (beta)", isOn: $burnOverlays)
+                            .disabled(isSubmitting)
+                        Text("If the editor generates overlay captions, bake them into the exported videos.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("Advanced")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { showAdvanced = false }
+                }
+            }
+        }
     }
 
 	    private func loadPickerItems() async {
@@ -368,6 +469,7 @@ struct ContentView: View {
 
     private func submit() async {
         errorMessage = nil
+        submitStatus = nil
 
         guard !isImportingClips else {
             errorMessage = "Still importing clips. Please wait a moment."
@@ -387,11 +489,15 @@ struct ContentView: View {
         }
 
         isSubmitting = true
-        defer { isSubmitting = false }
+        defer {
+            isSubmitting = false
+            submitStatus = nil
+        }
 
         let api = APIClient(baseURL: AppConfig.apiBaseURL, accessTokenProvider: { session.accessToken })
 
         do {
+            submitStatus = "Preparing clips…"
             let preparedClips = try await prepareUploads(readyClips.map(\.url))
 
             var referenceSpec: ReferenceSpec
@@ -405,35 +511,42 @@ struct ContentView: View {
                 guard let url = URL(string: raw), url.scheme != nil, url.host != nil else {
                     throw APIError.network("Please paste a valid http(s) URL (or switch to Upload).")
                 }
-                referenceSpec = ReferenceSpec(type: .url, url: url.absoluteString, filename: nil, contentType: nil, bytes: nil)
+                referenceSpec = ReferenceSpec(type: .url, url: url.absoluteString, filename: nil, contentType: nil, bytes: nil, sha256: nil)
             case .upload:
                 guard let clip = referenceClip else { throw APIError.network("Missing reference video.") }
+                submitStatus = "Preparing reference…"
                 let refURL = try await VideoCompressor.compressIfNeeded(fileURL: clip.url, enabled: compressBeforeUpload)
                 let refBytes = try fileSize(refURL)
                 let refContentType = mimeType(for: refURL)
+                submitStatus = "Hashing reference…"
+                let refSha = try await sha256Hex(of: refURL)
                 referenceSpec = ReferenceSpec(
                     type: .upload,
                     url: nil,
                     filename: refURL.lastPathComponent,
                     contentType: refContentType,
-                    bytes: refBytes
+                    bytes: refBytes,
+                    sha256: refSha
                 )
                 referenceFileURL = refURL
             }
 
+            submitStatus = "Creating job…"
             let job = try await api.createJob(
                 CreateJobRequest(
                     reference: referenceSpec,
                     variations: variations,
                     burnOverlays: burnOverlays,
-                    clips: preparedClips.map { ClipSpec(filename: $0.filename, contentType: $0.contentType, bytes: $0.bytes) }
+                    director: director,
+                    clips: preparedClips.map { ClipSpec(filename: $0.filename, contentType: $0.contentType, bytes: $0.bytes, sha256: $0.sha256) }
                 )
             )
 
-            if let refTarget = job.referenceUpload {
+            if let refTarget = job.referenceUpload, refTarget.alreadyUploaded != true {
                 guard let referenceFileURL, let refCT = referenceSpec.contentType else {
                     throw APIError.network("Missing reference upload file.")
                 }
+                submitStatus = "Uploading reference…"
                 try await uploadFile(to: refTarget.uploadUrl, fileURL: referenceFileURL, contentType: refCT)
             }
 
@@ -441,10 +554,15 @@ struct ContentView: View {
                 throw APIError.network("Upload mismatch. Please try again.")
             }
             for (idx, target) in job.clipUploads.enumerated() {
+                if target.alreadyUploaded == true {
+                    continue
+                }
                 let file = preparedClips[idx]
+                submitStatus = "Uploading clip \(idx + 1)/\(preparedClips.count)…"
                 try await uploadFile(to: target.uploadUrl, fileURL: file.url, contentType: file.contentType)
             }
 
+            submitStatus = "Starting job…"
             try await api.startJob(jobId: job.jobId)
             path.append(job.jobId)
         } catch {
@@ -464,27 +582,42 @@ struct ContentView: View {
         let filename: String
         let contentType: String
         let bytes: Int
+        let sha256: String
     }
 
     private func prepareUploads(_ urls: [URL]) async throws -> [PreparedUpload] {
         var out: [PreparedUpload] = []
         out.reserveCapacity(urls.count)
 
-        for url in urls {
+        for (idx, url) in urls.enumerated() {
+            await MainActor.run {
+                submitStatus = "Preparing clip \(idx + 1)/\(urls.count)…"
+            }
             let processedURL = try await VideoCompressor.compressIfNeeded(fileURL: url, enabled: compressBeforeUpload)
             let bytes = try fileSize(processedURL)
             let contentType = mimeType(for: processedURL)
+            await MainActor.run {
+                submitStatus = "Hashing clip \(idx + 1)/\(urls.count)…"
+            }
+            let sha = try await sha256Hex(of: processedURL)
             out.append(
                 PreparedUpload(
                     url: processedURL,
                     filename: processedURL.lastPathComponent,
                     contentType: contentType,
-                    bytes: bytes
+                    bytes: bytes,
+                    sha256: sha
                 )
             )
         }
 
         return out
+    }
+
+    private func sha256Hex(of url: URL) async throws -> String {
+        try await Task.detached(priority: .utility) {
+            try FileHasher.sha256Hex(of: url)
+        }.value
     }
 
     private func fileSize(_ url: URL) throws -> Int {

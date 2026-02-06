@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import typing as t
 
 
@@ -10,6 +11,31 @@ def _clamp(x: float, lo: float, hi: float) -> float:
 
 def _norm_tag(tag: str) -> str:
     return " ".join((tag or "").strip().lower().split())
+
+
+def _grade_preset(name: str) -> dict[str, float] | None:
+    """
+    Translate a small set of named grade presets into deterministic grade dicts.
+
+    This exists so the critic can return compact actions (e.g. "night_boost") that
+    compile into deterministic ffmpeg parameters.
+    """
+    s = (name or "").strip().lower()
+    if not s:
+        return None
+    s = s.replace("-", "_").replace(" ", "_")
+    while "__" in s:
+        s = s.replace("__", "_")
+
+    presets: dict[str, dict[str, float]] = {
+        # Lift visibility for underexposed night footage without blowing highlights too hard.
+        "night_boost": {"brightness": 0.12, "contrast": 1.12, "saturation": 1.06},
+        # Slightly crush blacks for a more low-key look (use cautiously).
+        "night_crush": {"brightness": -0.06, "contrast": 1.22, "saturation": 1.02},
+        # Neutral reset (useful if a segment got over-graded).
+        "reset": {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "gamma": 1.0, "r_gain": 1.0, "g_gain": 1.0, "b_gain": 1.0},
+    }
+    return presets.get(s)
 
 
 def _validate_overlay_text(value: str) -> tuple[bool, str | None]:
@@ -23,6 +49,43 @@ def _validate_overlay_text(value: str) -> tuple[bool, str | None]:
         if len(ln) > 26:
             return False, "overlay_text lines must be <= 26 chars"
     return True, "\n".join(lines)
+
+
+_SHOT_ID_RE = re.compile(r"^(?P<asset_id>[A-Za-z0-9-]+)#(?P<start_ms>\d+)_(?P<end_ms>\d+)$")
+_SHOT_ID_IN_NOTES_RE = re.compile(r"\bshot_id=([A-Za-z0-9-]+#\d+_\d+)\b")
+
+
+def _shot_window_s_from_shot_id(shot_id: str) -> tuple[float, float] | None:
+    """
+    Parse shot window boundaries from a shot_id like: <asset_id>#00001234_00005678 (ms).
+    Returns (start_s, end_s) or None.
+    """
+    s = str(shot_id or "").strip()
+    if not s:
+        return None
+    m = _SHOT_ID_RE.match(s)
+    if not m:
+        return None
+    try:
+        start_ms = int(m.group("start_ms"))
+        end_ms = int(m.group("end_ms"))
+    except Exception:
+        return None
+    if end_ms <= start_ms:
+        return None
+    return float(start_ms) / 1000.0, float(end_ms) / 1000.0
+
+
+def _shot_id_from_segment(seg: dict[str, t.Any]) -> str | None:
+    v = seg.get("shot_id")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    notes = seg.get("notes")
+    if isinstance(notes, str) and notes:
+        m = _SHOT_ID_IN_NOTES_RE.search(notes)
+        if m:
+            return str(m.group(1) or "").strip() or None
+    return None
 
 
 def apply_fix_actions(
@@ -99,17 +162,156 @@ def apply_fix_actions(
             applied.append(rec)
             continue
 
+        if atype == "shift_inpoint":
+            # Move the in-point by a small delta, clamped to the selected shot window (if available).
+            raw = act.get("seconds") if act.get("seconds") is not None else act.get("value")
+            try:
+                requested = float(raw)
+            except Exception:
+                rejected.append({"reason": "shift_inpoint requires seconds (float) in seconds or value", "action": act})
+                continue
+            delta = _clamp(float(requested), -0.60, 0.60)
+
+            if seg.get("asset_in_s") is None:
+                rejected.append({"reason": "shift_inpoint requires timeline_segments[].asset_in_s", "action": act})
+                continue
+            try:
+                old_in = float(seg.get("asset_in_s"))
+            except Exception:
+                rejected.append({"reason": "shift_inpoint asset_in_s must be float", "action": act})
+                continue
+
+            if seg.get("duration_s") is None:
+                rejected.append({"reason": "shift_inpoint requires timeline_segments[].duration_s", "action": act})
+                continue
+            try:
+                dur = float(seg.get("duration_s"))
+            except Exception:
+                rejected.append({"reason": "shift_inpoint duration_s must be float", "action": act})
+                continue
+            if dur <= 0.0:
+                rejected.append({"reason": "shift_inpoint duration_s must be > 0", "action": act})
+                continue
+
+            sp_raw = seg.get("speed")
+            try:
+                speed = float(sp_raw) if sp_raw is not None else 1.0
+            except Exception:
+                speed = 1.0
+            if speed <= 0.0:
+                speed = 1.0
+
+            src_span = float(dur) * float(speed)
+            shot_id = _shot_id_from_segment(seg)
+            win = _shot_window_s_from_shot_id(shot_id) if shot_id else None
+
+            new_in = float(old_in) + float(delta)
+            unclamped_in = float(new_in)
+            if win is not None:
+                start_s, end_s = win
+                max_start = float(end_s) - float(src_span)
+                if max_start < float(start_s) - 1e-6:
+                    rejected.append({"reason": "shift_inpoint cannot satisfy shot window", "action": act})
+                    continue
+                new_in = _clamp(float(new_in), float(start_s), float(max_start))
+            else:
+                new_in = max(0.0, float(new_in))
+
+            seg["asset_in_s"] = float(new_in)
+            if "asset_out_s" in seg:
+                try:
+                    seg["asset_out_s"] = float(new_in) + float(dur) * float(speed)
+                except Exception:
+                    pass
+
+            rec3: dict[str, t.Any] = {"type": atype, "segment_id": sid, "seconds": float(new_in - old_in)}
+            if abs(float(requested) - float(delta)) >= 1e-6:
+                rec3["seconds_clamped_from"] = float(requested)
+            if abs(float(unclamped_in) - float(new_in)) >= 1e-6:
+                rec3["asset_in_s_clamped_from"] = float(unclamped_in)
+            applied.append(rec3)
+            continue
+
+        if atype == "set_speed":
+            raw = act.get("value") if act.get("value") is not None else act.get("seconds")
+            try:
+                requested = float(raw)
+            except Exception:
+                rejected.append({"reason": "set_speed.value must be float", "action": act})
+                continue
+            speed = _clamp(float(requested), 0.85, 1.25)
+
+            if seg.get("asset_in_s") is None:
+                rejected.append({"reason": "set_speed requires timeline_segments[].asset_in_s", "action": act})
+                continue
+            try:
+                in_s = float(seg.get("asset_in_s"))
+            except Exception:
+                rejected.append({"reason": "set_speed asset_in_s must be float", "action": act})
+                continue
+
+            if seg.get("duration_s") is None:
+                rejected.append({"reason": "set_speed requires timeline_segments[].duration_s", "action": act})
+                continue
+            try:
+                dur = float(seg.get("duration_s"))
+            except Exception:
+                rejected.append({"reason": "set_speed duration_s must be float", "action": act})
+                continue
+            if dur <= 0.0:
+                rejected.append({"reason": "set_speed duration_s must be > 0", "action": act})
+                continue
+
+            # Clamp in-point to shot window if known (avoid looping).
+            shot_id = _shot_id_from_segment(seg)
+            win = _shot_window_s_from_shot_id(shot_id) if shot_id else None
+            new_in = float(in_s)
+            new_in0 = float(new_in)
+            if win is not None:
+                start_s, end_s = win
+                max_start = float(end_s) - (float(dur) * float(speed))
+                if max_start < float(start_s) - 1e-6:
+                    rejected.append({"reason": "set_speed cannot satisfy shot window", "action": act})
+                    continue
+                new_in = _clamp(float(new_in), float(start_s), float(max_start))
+            else:
+                new_in = max(0.0, float(new_in))
+
+            seg["speed"] = float(speed)
+            seg["asset_in_s"] = float(new_in)
+            if "asset_out_s" in seg:
+                try:
+                    seg["asset_out_s"] = float(new_in) + float(dur) * float(speed)
+                except Exception:
+                    pass
+
+            rec4: dict[str, t.Any] = {"type": atype, "segment_id": sid, "value": float(speed)}
+            if abs(float(requested) - float(speed)) >= 1e-6:
+                rec4["clamped_from"] = float(requested)
+            if abs(float(new_in0) - float(new_in)) >= 1e-6:
+                rec4["asset_in_s_adjusted_from"] = float(new_in0)
+            applied.append(rec4)
+            continue
+
         if atype == "set_grade":
             v = act.get("value")
+            if isinstance(v, str):
+                preset = _grade_preset(v)
+                if preset is None:
+                    rejected.append({"reason": "set_grade preset unknown", "action": act})
+                    continue
+                v = preset
             if not isinstance(v, dict):
-                rejected.append({"reason": "set_grade.value must be object", "action": act})
+                rejected.append({"reason": "set_grade.value must be object or known preset string", "action": act})
                 continue
             cur = seg.get("grade")
             out: dict[str, float] = dict(cur) if isinstance(cur, dict) else {}
             # Conservative clamps aligned with _compute_eq_grade().
             for k, lo, hi in (
-                ("brightness", -0.25, 0.25),
+                ("brightness", -0.30, 0.30),
                 ("contrast", 0.75, 1.55),
+                ("saturation", 0.60, 1.70),
+                ("gamma", 0.75, 1.55),
                 ("r_gain", 0.70, 1.40),
                 ("g_gain", 0.70, 1.40),
                 ("b_gain", 0.70, 1.40),
@@ -349,4 +551,3 @@ def apply_segment_deltas_to_timeline(
         applied.append(rec)
 
     return patched, {"applied": applied, "rejected": rejected}
-

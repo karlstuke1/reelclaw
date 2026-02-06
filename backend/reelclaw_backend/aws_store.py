@@ -51,6 +51,7 @@ class DynamoJobStore:
         reference: dict[str, Any],
         variations: int,
         burn_overlays: bool,
+        director: str | None = None,
         clips: list[dict[str, Any]],
         ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
@@ -58,17 +59,20 @@ class DynamoJobStore:
 
         job_id = f"job_{uuid4().hex[:16]}"
         created_at = _utc_now_iso()
-        ttl: int | None = None
-        if ttl_seconds and int(ttl_seconds) > 0:
-            ttl = _epoch_in(int(ttl_seconds))
+        updated_at = created_at
 
         record: dict[str, Any] = {
             "job_id": job_id,
             "user_id": str(user_id),
             "created_at": created_at,
+            "updated_at": updated_at,
+            "queued_at": None,
+            "started_at": None,
+            "finished_at": None,
             "reference": reference,
             "variations": int(variations),
             "burn_overlays": bool(burn_overlays),
+            "director": str(director) if director else None,
             "status": "uploading",
             "stage": "Uploading",
             "message": "Upload clips…",
@@ -79,7 +83,6 @@ class DynamoJobStore:
             "clips": clips,
             "variants": [],
             "batch_job_id": None,
-            "ttl": ttl,
         }
         self._table().put_item(Item=_dynamo_sanitize(record))
         return record
@@ -96,6 +99,28 @@ class DynamoJobStore:
         rec = self.get(job_id)
         if not rec:
             raise KeyError(f"job not found: {job_id}")
+
+        now_iso = _utc_now_iso()
+        prev_status = str(rec.get("status") or "").strip().lower()
+        next_status = str(fields.get("status") or prev_status).strip().lower()
+
+        if "updated_at" not in fields:
+            fields["updated_at"] = now_iso
+
+        def _set_if_empty(key: str) -> None:
+            cur = str(rec.get(key) or "").strip()
+            if not cur:
+                rec[key] = now_iso
+
+        if "status" in fields and next_status:
+            # Backfill timestamps even if the job started before these fields existed.
+            if next_status == "queued":
+                _set_if_empty("queued_at")
+            elif next_status == "running":
+                _set_if_empty("started_at")
+            elif next_status in {"succeeded", "failed"}:
+                _set_if_empty("finished_at")
+
         rec.update(fields)
         self.put(rec)
         return rec
@@ -111,6 +136,9 @@ class DynamoJobStore:
         )
         items = resp.get("Items") or []
         return [it for it in items if isinstance(it, dict)]
+
+    def delete(self, job_id: str) -> None:
+        self._table().delete_item(Key={"job_id": str(job_id)})
 
 
 @dataclass

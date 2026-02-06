@@ -28,11 +28,24 @@ struct JobProgressView: View {
                         .buttonStyle(.bordered)
                         .padding(.top, 4)
                 }
-                Button("Try again") {
-                    Task { await poll() }
+                if status?.status == .failed {
+                    Button("Retry") {
+                        Task { await retry() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 8)
+
+                    Button("Refresh status") {
+                        Task { await poll() }
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    Button("Try again") {
+                        Task { await poll() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 8)
                 }
-                .buttonStyle(.borderedProminent)
-                .padding(.top, 8)
             } else {
                 ProgressView(value: progressValue, total: progressTotal)
                     .progressViewStyle(.linear)
@@ -47,6 +60,13 @@ struct JobProgressView: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 480)
+                }
+
+                if let etaLine {
+                    Text(etaLine)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                 }
 
                 Text(jobId)
@@ -127,6 +147,25 @@ struct JobProgressView: View {
         return n == 1 ? "View variation" : "View \(n) variations"
     }
 
+    private var etaLine: String? {
+        guard let s = status?.status else { return nil }
+        if s != .queued && s != .running {
+            return nil
+        }
+        if let seconds = status?.etaSeconds {
+            return "About \(etaString(seconds: seconds)) remaining"
+        }
+        return "Estimating time…"
+    }
+
+    private func etaString(seconds: Int) -> String {
+        let s = max(0, seconds)
+        if s < 60 { return "1 min" }
+        if s < 3600 { return "\(max(1, Int(round(Double(s) / 60.0)))) min" }
+        let h = Int(round(Double(s) / 3600.0))
+        return h == 1 ? "1 hr" : "\(h) hr"
+    }
+
     private func poll() async {
         errorMessage = nil
         errorDetail = nil
@@ -160,6 +199,26 @@ struct JobProgressView: View {
 
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
+    }
+
+    private func retry() async {
+        errorMessage = nil
+        errorDetail = nil
+        let api = APIClient(baseURL: AppConfig.apiBaseURL, accessTokenProvider: { session.accessToken })
+        do {
+            try await api.startJob(jobId: jobId)
+        } catch {
+            if let apiError = error as? APIError,
+               case let .server(code, _) = apiError,
+               code == 401
+            {
+                session.signOut(reason: "Session expired. Please sign in again.")
+                return
+            }
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return
+        }
+        await poll()
     }
 }
 
