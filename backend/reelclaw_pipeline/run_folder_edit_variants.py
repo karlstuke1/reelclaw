@@ -1768,7 +1768,15 @@ def main() -> int:
         # To make variants meaningfully different, we:
         # - penalize assets used many times across variants (usage_penalty)
         # - resample if the asset_id set is too similar to previous variants (min_jaccard_dist)
-        best: tuple[float, list[dict[str, t.Any]], set[str]] | None = None  # (min_dist, decisions, aset)
+        # Attempt-level search to avoid degeneracy (e.g., the same clip repeated for most segments)
+        # while still enforcing cross-variant diversity (Jaccard distance vs prior_sets).
+        best_ok: tuple[float, list[dict[str, t.Any]], set[str]] | None = None  # (min_dist, decisions, aset)
+        best_deg: tuple[float, list[dict[str, t.Any]], set[str]] | None = None  # fallback if the library is truly tiny
+        available_video_assets = 0
+        try:
+            available_video_assets = sum(1 for m in asset_by_id.values() if str(m.get("kind") or "video") == "video")
+        except Exception:
+            available_video_assets = len(asset_by_id)
         for attempt in range(max_retries):
             rng = random.Random((base_seed * 1000) + attempt)
             used: set[str] = set()
@@ -2145,13 +2153,19 @@ def main() -> int:
                             shortlist = list((shot_candidates_by_seg_by_plan.get(plan_id) or {}).get(int(seg.id)) or [])
                         else:
                             shortlist = list(shot_candidates_by_seg.get(int(seg.id)) or [])
+                        # Base pool: top-N ranked shots for this segment.
                         pool0 = shortlist[: max(4, int(params.top_n))]
 
-                        # Avoid over-reusing the same underlying asset within a single variant if possible.
-                        min_pool = max(4, int(params.top_n) // 3)
+                        # Avoid over-reusing the same underlying asset within a single variant.
+                        #
+                        # IMPORTANT: if we only consider pool0, the pool can collapse to a single asset
+                        # for many segments (\"same clip repeated\") even when the broader shortlist
+                        # contains viable alternatives. So we scan deeper when enforcing caps.
+                        scan_k = max(len(pool0), max(24, int(params.top_n) * 3))
+                        pool_scan = shortlist[: min(len(shortlist), int(scan_k))]
                         pool_unused: list[dict[str, t.Any]] = []
                         pool_cap: list[dict[str, t.Any]] = []
-                        for s in pool0:
+                        for s in pool_scan:
                             aid0 = str(s.get("asset_id") or "").strip()
                             if not aid0:
                                 continue
@@ -2159,11 +2173,14 @@ def main() -> int:
                                 pool_unused.append(s)
                             if int(asset_counts.get(aid0, 0)) < int(max_per_asset):
                                 pool_cap.append(s)
-                        if len(pool_unused) >= min_pool:
+
+                        # Prefer never-used assets first (max diversity), then assets still under cap.
+                        if pool_unused:
                             pool = pool_unused
-                        elif len(pool_cap) >= min_pool:
+                        elif pool_cap:
                             pool = pool_cap
                         else:
+                            # Library too small or shortlist too degenerate; fall back to the top-ranked pool.
                             pool = pool0
                         # Avoid repeating the same shot_id within a single edit when possible.
                         pool_unique = [s for s in pool if str(s.get("id") or "").strip() and str(s.get("id") or "").strip() not in used_shots]
@@ -2249,7 +2266,6 @@ def main() -> int:
                             segment=seg, assets=assets_for_planner, used_asset_ids=used, limit=int(params.top_n)
                         )
                         # Avoid repeats if possible; cap per-asset usage within a variant.
-                        min_pool = max(4, int(params.top_n) // 3)
                         pool_unused: list[dict[str, t.Any]] = []
                         pool_cap: list[dict[str, t.Any]] = []
                         for a in shortlist:
@@ -2260,9 +2276,9 @@ def main() -> int:
                                 pool_unused.append(a)
                             if int(asset_counts.get(aid0, 0)) < int(max_per_asset):
                                 pool_cap.append(a)
-                        if len(pool_unused) >= min_pool:
+                        if pool_unused:
                             pool = pool_unused
-                        elif len(pool_cap) >= min_pool:
+                        elif pool_cap:
                             pool = pool_cap
                         else:
                             pool = shortlist
@@ -2277,19 +2293,36 @@ def main() -> int:
                         prev_seg = seg
 
             aset = {str(d.get("asset_id") or "") for d in decisions_try if str(d.get("asset_id") or "").strip()}
-            if not prior_sets or min_jaccard_dist <= 0.0:
-                best = (1.0, decisions_try, aset)
+            uniq_assets = len(aset)
+            degenerate = bool(available_video_assets >= 2 and uniq_assets <= 1)
+
+            md = 1.0
+            if prior_sets and min_jaccard_dist > 0.0:
+                # Enforce diversity vs all prior variants.
+                md = min((_jaccard_distance(aset, s) for s in prior_sets), default=1.0)
+
+            # Keep the best non-degenerate attempt; if we can't find one, fall back to degenerate.
+            if degenerate:
+                if best_deg is None or float(md) > float(best_deg[0]):
+                    best_deg = (float(md), decisions_try, aset)
+                continue
+
+            if best_ok is None or float(md) > float(best_ok[0]):
+                best_ok = (float(md), decisions_try, aset)
+
+            # If we hit our target diversity, take it (keeps runtime bounded).
+            if (not prior_sets) or (min_jaccard_dist <= 0.0) or (float(md) >= float(min_jaccard_dist)):
                 break
 
-            # Enforce diversity vs all prior variants.
-            md = min((_jaccard_distance(aset, s) for s in prior_sets), default=1.0)
-            if best is None or md > best[0]:
-                best = (md, decisions_try, aset)
-            if md >= min_jaccard_dist:
-                break
-
-        assert best is not None
+        best = best_ok or best_deg
+        if best is None:
+            raise RuntimeError("No feasible variant decisions were produced (empty candidate pool).")
         min_dist, decisions, aset = best
+        if best_ok is None and best_deg is not None and available_video_assets >= 2:
+            print(
+                f"[warn] Variant {variant_id}: fell back to a degenerate plan (uniq_assets={len(aset)}). This usually means the per-segment shortlist collapsed.",
+                flush=True,
+            )
         # Update global usage only for the accepted variant.
         for aid in aset:
             asset_usage[aid] = asset_usage.get(aid, 0) + 1
