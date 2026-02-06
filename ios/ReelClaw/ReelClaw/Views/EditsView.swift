@@ -61,9 +61,27 @@ struct EditsView: View {
                                     .textSelection(.enabled)
                             }
 
-                            if !stuckUploadingJobs.isEmpty {
-                                sectionHeader("Stuck Uploads")
-                                stuckUploadsCard
+                            sectionHeader("Completed")
+                            if completedJobs.isEmpty {
+                                emptyCompletedState
+                            } else {
+                                LazyVGrid(columns: gridColumns, spacing: 12) {
+                                    ForEach(completedJobs) { job in
+                                        Button {
+                                            path.append(.variants(job.jobId))
+                                        } label: {
+                                            CompletedTile(job: job)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .contextMenu {
+                                            Button(role: .destructive) {
+                                                deleteCandidate = job
+                                            } label: {
+                                                Label("Delete edit…", systemImage: "trash")
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             if !inProgressJobs.isEmpty {
@@ -132,27 +150,9 @@ struct EditsView: View {
                                 }
                             }
 
-                            sectionHeader("Completed")
-                            if completedJobs.isEmpty {
-                                emptyCompletedState
-                            } else {
-                                LazyVGrid(columns: gridColumns, spacing: 12) {
-                                    ForEach(completedJobs) { job in
-                                        Button {
-                                            path.append(.variants(job.jobId))
-                                        } label: {
-                                            CompletedTile(job: job)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .contextMenu {
-                                            Button(role: .destructive) {
-                                                deleteCandidate = job
-                                            } label: {
-                                                Label("Delete edit…", systemImage: "trash")
-                                            }
-                                        }
-                                    }
-                                }
+                            if !stuckUploadingJobs.isEmpty {
+                                sectionHeader("Stuck Uploads")
+                                stuckUploadsCard
                             }
                         }
                         .padding(12)
@@ -232,7 +232,8 @@ struct EditsView: View {
 
     private var inProgressJobs: [JobSummaryResponse] {
         jobs
-            .filter { $0.status == .queued || $0.status == .running }
+            .filter { $0.status == .uploading || $0.status == .queued || $0.status == .running }
+            .filter { $0.status != .uploading || !isUploadStuck($0) }
             .sorted(by: newestFirst)
     }
 
