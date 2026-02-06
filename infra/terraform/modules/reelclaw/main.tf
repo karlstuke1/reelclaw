@@ -955,6 +955,8 @@ resource "aws_batch_job_definition" "worker" {
       # Enable learning-to-rank as primary selection signal (when model is present).
       { name = "VARIANT_PAIRWISE_RANKER", value = "1" },
       { name = "RANK_PAIRWISE_PRIMARY", value = "1" },
+      # Pairwise ranker outputs are roughly ~[-1, +1]; scale to be comparable with other rank terms.
+      { name = "RANK_PAIRWISE_PRIMARY_SCALE", value = "10" },
       { name = "REELCLAW_YTDLP_COOKIES_SECRET_ID", value = aws_secretsmanager_secret.ytdlp_cookies.name },
       # Keep the cloud worker aligned with local --pro defaults.
       { name = "REASONING_EFFORT", value = "high" }
