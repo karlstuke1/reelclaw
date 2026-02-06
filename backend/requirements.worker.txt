@@ -3,3 +3,4 @@ numpy>=1.26,<2.0
 scikit-learn>=1.5,<2.0
 joblib>=1.4,<2.0
 Pillow>=10.0,<11.0
+opencv-python-headless>=4.10,<5.0

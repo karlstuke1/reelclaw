@@ -256,6 +256,62 @@ def _download_s3_dir(*, s3, bucket: str, prefix: str, dst_dir: Path) -> None:
             s3.download_file(bucket, key, str(dst))
 
 
+def _parse_s3_prefix(value: str, *, default_bucket: str) -> tuple[str, str]:
+    """
+    Accept either:
+    - s3://bucket/prefix
+    - prefix (relative to default_bucket)
+    Returns (bucket, prefix) with prefix never starting with '/'.
+    """
+    s = str(value or "").strip()
+    if not s:
+        return str(default_bucket), ""
+    if s.startswith("s3://"):
+        rest = s[len("s3://") :]
+        parts = rest.split("/", 1)
+        bucket = parts[0].strip()
+        prefix = parts[1].strip() if len(parts) > 1 else ""
+        return bucket, prefix.lstrip("/")
+    return str(default_bucket), s.lstrip("/")
+
+
+def _download_s3_prefix(*, s3, bucket: str, prefix: str, dst_dir: Path) -> None:
+    """
+    Download all objects under prefix to dst_dir, preserving relative paths.
+    """
+    prefix = str(prefix or "").lstrip("/")
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents") or []:
+            key = str(obj.get("Key") or "")
+            if not key or key.endswith("/"):
+                continue
+            rel = key[len(prefix) :].lstrip("/") if key.startswith(prefix) else Path(key).name
+            dst = (dst_dir / rel).resolve()
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket, key, str(dst))
+
+
+def _zip_paths(*, paths: list[Path], zip_path: Path, base_dir: Path) -> None:
+    import zipfile
+
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(str(zip_path), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for p in paths:
+            try:
+                pp = p.resolve()
+            except Exception:
+                pp = p
+            if not pp.exists() or not pp.is_file():
+                continue
+            try:
+                arc = pp.relative_to(base_dir.resolve())
+            except Exception:
+                arc = pp.name
+            zf.write(str(pp), str(arc))
+
+
 def main() -> int:
     env = _load_env()
     jobs = DynamoJobStore(table_name=env.jobs_table, region=env.region)
@@ -276,10 +332,20 @@ def main() -> int:
     if director not in {"code", "gemini", "auto"}:
         director = None
 
+    quality_mode = str(_env("REELCLAW_QUALITY_MODE", "standard") or "standard").strip().lower() or "standard"
+    superb_mode = quality_mode in {"superb", "gold", "superb_ml"}
+
     pro_mode = _truthy_env("REELCLAW_PRO_MODE", "1")
     if director in {"gemini", "auto"}:
         pro_mode = True
     internal_variants = _internal_variant_count(finals=variations, pro_mode=pro_mode)
+    if superb_mode:
+        raw = (_env("REELCLAW_SUPERB_VARIANTS") or "").strip()
+        try:
+            target = int(float(raw)) if raw else 60
+        except Exception:
+            target = 60
+        internal_variants = max(int(internal_variants), int(target))
     if director in {"gemini", "auto"} and internal_variants > 12 and not _truthy_env("ALLOW_GEMINI_DIRECTOR_MANY", "0"):
         internal_variants = max(int(variations), 12)
 
@@ -363,6 +429,45 @@ def main() -> int:
                 for fut in as_completed(futures):
                     fut.result()
 
+    # Optional: download ML models (grader/ranker/issue detector) from S3.
+    grader_dir_local: Path | None = None
+    ranker_dir_local: Path | None = None
+    issue_detector_dir_local: Path | None = None
+    try:
+        grader_prefix = (_env("REELCLAW_GRADER_S3_PREFIX") or "").strip()
+        ranker_prefix = (_env("REELCLAW_RANKER_S3_PREFIX") or "").strip()
+        issue_prefix = (_env("REELCLAW_ISSUE_DETECTOR_S3_PREFIX") or "").strip()
+        if grader_prefix or ranker_prefix or issue_prefix:
+            _update_job(
+                jobs,
+                env.job_id,
+                status="running",
+                stage="Loading models",
+                message="Loading editing models…",
+                progress_current=0,
+                progress_total=variations,
+            )
+            models_dir = job_root / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+
+            def _dl(prefix: str, *, name: str) -> Path | None:
+                if not prefix:
+                    return None
+                bucket, pfx = _parse_s3_prefix(prefix, default_bucket=env.outputs_bucket)
+                if not pfx:
+                    return None
+                dst = models_dir / name
+                _download_s3_prefix(s3=s3, bucket=bucket, prefix=pfx, dst_dir=dst)
+                return dst if (dst / "meta.json").exists() else dst
+
+            grader_dir_local = _dl(grader_prefix, name="grader")
+            ranker_dir_local = _dl(ranker_prefix, name="ranker")
+            issue_detector_dir_local = _dl(issue_prefix, name="issues")
+    except Exception:
+        grader_dir_local = grader_dir_local
+        ranker_dir_local = ranker_dir_local
+        issue_detector_dir_local = issue_detector_dir_local
+
     _update_job(
         jobs,
         env.job_id,
@@ -375,6 +480,13 @@ def main() -> int:
 
     # Run variant pipeline (reel replication only; no image-gen).
     backend_root = Path(__file__).resolve().parents[1]
+    pipeline_timeout = 240
+    if superb_mode:
+        raw = (_env("REELCLAW_SUPERB_PIPELINE_TIMEOUT_S") or "").strip()
+        try:
+            pipeline_timeout = int(float(raw)) if raw else 360
+        except Exception:
+            pipeline_timeout = 360
     cmd = [
         sys.executable,
         "-m",
@@ -394,7 +506,7 @@ def main() -> int:
         "--model",
         str(_env("REELCLAW_DIRECTOR_MODEL", _env("DIRECTOR_MODEL", "google/gemini-3-pro-preview"))),
         "--timeout",
-        "240",
+        str(int(pipeline_timeout)),
     ]
     if pro_mode:
         cmd.append("--pro")
@@ -411,6 +523,27 @@ def main() -> int:
         run_env["REEL_ANALYSIS_MAX_SECONDS"] = "0"
     else:
         run_env["REEL_ANALYSIS_MAX_SECONDS"] = str(int(env.reference_analysis_max_seconds))
+
+    # Attach optional local model dirs so both the per-variant generator and finals selector can use them.
+    if grader_dir_local and (grader_dir_local / "meta.json").exists():
+        run_env["FOLDER_EDIT_LEARNED_GRADER_DIR"] = str(grader_dir_local)
+        run_env["VARIANT_LEARNED_GRADER_DIR"] = str(grader_dir_local)
+        # Enable both steering (folder_edit_pipeline) and finals ranking (run_folder_edit_variants).
+        run_env.setdefault("FOLDER_EDIT_LEARNED_GRADER_STEER", "1")
+        run_env.setdefault("VARIANT_LEARNED_GRADER", "1")
+    if ranker_dir_local and (ranker_dir_local / "meta.json").exists():
+        run_env["VARIANT_PAIRWISE_RANKER_DIR"] = str(ranker_dir_local)
+        run_env.setdefault("VARIANT_PAIRWISE_RANKER", "1")
+        run_env.setdefault("RANK_PAIRWISE_PRIMARY", "1")
+
+    # Superb mode: explore many candidates with cheap draft renders, then polish winners.
+    if superb_mode:
+        run_env.setdefault("FOLDER_EDIT_RENDER_WIDTH", "540")
+        run_env.setdefault("FOLDER_EDIT_RENDER_HEIGHT", "960")
+        run_env.setdefault("FOLDER_EDIT_RENDER_PRESET", "ultrafast")
+        run_env.setdefault("FOLDER_EDIT_RENDER_CRF", "28")
+        # Keep draft variant search fast; the polish stage will re-render with stabilization on.
+        run_env.setdefault("FOLDER_EDIT_STABILIZE", "0")
 
     with log_path.open("w", encoding="utf-8") as log:
         log.write(f"$ {' '.join(cmd)}\n\n")
@@ -486,6 +619,60 @@ def main() -> int:
             )
             return 1
 
+    # Superb post-pass: re-render/polish finalists at full quality (micro DP + smart crop + stabilization).
+    if superb_mode:
+        try:
+            _update_job(
+                jobs,
+                env.job_id,
+                status="running",
+                stage="Polishing",
+                message="Polishing top picks…",
+                progress_current=min(produced, variations),
+                progress_total=variations,
+            )
+            from reelclaw_pipeline.superb_finalize import polish_finals
+
+            polish_timeout = 480.0
+            raw = (_env("REELCLAW_SUPERB_POLISH_TIMEOUT_S") or "").strip()
+            try:
+                polish_timeout = float(raw) if raw else 480.0
+            except Exception:
+                polish_timeout = 480.0
+
+            def _polish_progress(stage: str, i: int, total: int) -> None:
+                _update_job(
+                    jobs,
+                    env.job_id,
+                    status="running",
+                    stage=f"{stage} ({i}/{total})",
+                    message="Applying finishing touches…",
+                    progress_current=min(produced, variations),
+                    progress_total=variations,
+                )
+
+            polish_res = polish_finals(
+                project_root=out_dir,
+                burn_overlays=burn_overlays,
+                timeout_s=float(polish_timeout),
+                issue_detector_dir=issue_detector_dir_local,
+                progress_cb=_polish_progress,
+            )
+            try:
+                if not isinstance(polish_res, dict) or not polish_res.get("ok"):
+                    raise RuntimeError(str((polish_res or {}).get("error") or "polish_failed"))
+            except Exception as e:
+                with log_path.open("a", encoding="utf-8") as log:
+                    log.write(f"\n[warn] polish failed: {type(e).__name__}: {e}\n")
+        except Exception as e:
+            # Best-effort: keep draft finals if polish fails.
+            try:
+                with log_path.open("a", encoding="utf-8") as log:
+                    log.write(f"\n[warn] superb polish exception: {type(e).__name__}: {e}\n")
+            except Exception:
+                pass
+        produced = _count_variants(finals_dir)
+
     _update_job(
         jobs,
         env.job_id,
@@ -544,6 +731,62 @@ def main() -> int:
             }
         )
 
+    artifacts_s3_key: str | None = None
+    if superb_mode or _truthy_env("REELCLAW_UPLOAD_ARTIFACTS", "0"):
+        try:
+            _update_job(
+                jobs,
+                env.job_id,
+                status="running",
+                stage="Uploading artifacts",
+                message="Saving training metadata…",
+                progress_current=min(produced, variations),
+                progress_total=variations,
+            )
+            art_dir = job_root / "artifacts"
+            art_dir.mkdir(parents=True, exist_ok=True)
+
+            paths: list[Path] = []
+            # Core metadata.
+            for p0 in (
+                log_path,
+                out_dir / "index.tsv",
+                out_dir / "fast_features.jsonl",
+                out_dir / "learned_grader_predictions.json",
+                out_dir / "pairwise_ranker_scores.json",
+                finals_dir / "finals_manifest.json",
+                out_dir / "polish" / "manifest_polished.json",
+            ):
+                if p0.exists() and p0.is_file():
+                    paths.append(p0)
+
+            # Polished timelines (finalists).
+            polish_dir = out_dir / "polish"
+            if polish_dir.exists():
+                for tp in sorted(polish_dir.glob("v*/timeline_polished.json")):
+                    if tp.exists() and tp.is_file():
+                        paths.append(tp)
+
+            # Per-variant timelines (close the data loop).
+            include_all = superb_mode or _truthy_env("REELCLAW_ARTIFACTS_ALL_VARIANT_TIMELINES", "0")
+            if include_all and variants_dir.exists():
+                for tp in sorted(variants_dir.glob("v*/timeline.json")):
+                    if tp.exists() and tp.is_file():
+                        paths.append(tp)
+            else:
+                # At minimum, upload finalist timelines.
+                for tp in sorted(finals_dir.glob("v*/timeline.json")):
+                    if tp.exists() and tp.is_file():
+                        paths.append(tp)
+
+            zip_path = art_dir / "pipeline_artifacts.zip"
+            _zip_paths(paths=paths, zip_path=zip_path, base_dir=job_root)
+
+            artifacts_s3_key = f"outputs/{user_id}/{env.job_id}/artifacts/{zip_path.name}"
+            s3.upload_file(str(zip_path), env.outputs_bucket, artifacts_s3_key)
+        except Exception:
+            artifacts_s3_key = None
+
     _update_job(
         jobs,
         env.job_id,
@@ -551,6 +794,7 @@ def main() -> int:
         stage="Done",
         message="Your variations are ready.",
         variants=variants,
+        artifacts_s3_key=artifacts_s3_key,
         progress_current=min(produced, variations),
         progress_total=variations,
         error_code=None,

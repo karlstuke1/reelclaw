@@ -31,7 +31,7 @@ locals {
   # We require a secret header at the ALB listener and have API Gateway add it.
   origin_auth_header_name = "X-Reelclaw-Origin-Verify"
 
-  github_actions_enabled = var.env == "prod" && length(trimspace(var.github_repo)) > 0
+  github_actions_enabled  = var.env == "prod" && length(trimspace(var.github_repo)) > 0
   github_deploy_role_name = "${local.name}-github-deploy"
 }
 
@@ -503,7 +503,7 @@ resource "aws_apigatewayv2_integration" "alb_proxy" {
   # Prevent direct clients from hitting the ALB by requiring a secret header at the listener rule.
   request_parameters = {
     "overwrite:header.${local.origin_auth_header_name}" = random_password.cloudfront_origin_secret.result
-    "overwrite:path"                                   = "$request.path"
+    "overwrite:path"                                    = "$request.path"
   }
 }
 
@@ -718,7 +718,8 @@ resource "aws_ecs_task_definition" "api" {
         { name = "REELCLAW_BATCH_JOB_DEFINITION", value = aws_batch_job_definition.worker.name },
         { name = "REELCLAW_ENABLE_APNS", value = tostring(var.enable_apns) },
         { name = "REELCLAW_SNS_PLATFORM_APPLICATION_ARN", value = var.apns_platform_application_arn },
-        { name = "REELCLAW_REFERENCE_ANALYSIS_MAX_SECONDS", value = "25" },
+        # 0 (or unset) = no cap; use full reel length for analysis.
+        { name = "REELCLAW_REFERENCE_ANALYSIS_MAX_SECONDS", value = "0" },
         { name = "REELCLAW_APPLE_AUDIENCE", value = var.apple_audience }
       ]
       secrets = [
@@ -939,9 +940,24 @@ resource "aws_batch_job_definition" "worker" {
       { name = "REELCLAW_DEVICES_TABLE", value = aws_dynamodb_table.devices.name },
       { name = "REELCLAW_ENABLE_APNS", value = tostring(var.enable_apns) },
       { name = "REELCLAW_SNS_PLATFORM_APPLICATION_ARN", value = var.apns_platform_application_arn },
-      { name = "REELCLAW_REFERENCE_ANALYSIS_MAX_SECONDS", value = "25" },
+      # 0 (or unset) = no cap; use full reel length for analysis.
+      { name = "REELCLAW_REFERENCE_ANALYSIS_MAX_SECONDS", value = "0" },
+      # Quality mode: explore lots of draft candidates, then polish winners at full quality.
+      { name = "REELCLAW_QUALITY_MODE", value = "superb" },
+      { name = "REELCLAW_SUPERB_VARIANTS", value = "60" },
+      # ML models live in the env-specific outputs bucket.
+      { name = "REELCLAW_GRADER_S3_PREFIX", value = "models/grader/latest/" },
+      { name = "REELCLAW_RANKER_S3_PREFIX", value = "models/ranker/latest/" },
+      { name = "REELCLAW_ISSUE_DETECTOR_S3_PREFIX", value = "models/issues/latest/" },
+      # Persist per-variant metadata to S3 so production runs generate training data.
+      { name = "REELCLAW_UPLOAD_ARTIFACTS", value = "1" },
+      { name = "REELCLAW_ARTIFACTS_ALL_VARIANT_TIMELINES", value = "1" },
+      # Enable learning-to-rank as primary selection signal (when model is present).
+      { name = "VARIANT_PAIRWISE_RANKER", value = "1" },
+      { name = "RANK_PAIRWISE_PRIMARY", value = "1" },
       { name = "REELCLAW_YTDLP_COOKIES_SECRET_ID", value = aws_secretsmanager_secret.ytdlp_cookies.name },
-      { name = "REASONING_EFFORT", value = "low" }
+      # Keep the cloud worker aligned with local --pro defaults.
+      { name = "REASONING_EFFORT", value = "high" }
     ]
 
     secrets = [
@@ -959,7 +975,8 @@ resource "aws_batch_job_definition" "worker" {
   })
 
   timeout {
-    attempt_duration_seconds = 3600
+    # Superb mode can generate many candidates + polish finalists; give it headroom.
+    attempt_duration_seconds = 7200
   }
 
   retry_strategy {

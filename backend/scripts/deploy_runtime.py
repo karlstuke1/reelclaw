@@ -15,6 +15,16 @@ def _pick(d: dict[str, Any], keys: list[str]) -> dict[str, Any]:
     return out
 
 
+def _upsert_env_var(env_list: list[dict[str, Any]], *, name: str, value: str) -> None:
+    for item in env_list:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name") or "") == name:
+            item["value"] = str(value)
+            return
+    env_list.append({"name": str(name), "value": str(value)})
+
+
 def _ecs_register_task_definition_with_image(*, ecs, family: str, container_name: str, image: str) -> str:
     td = ecs.describe_task_definition(taskDefinition=family)["taskDefinition"]
 
@@ -24,6 +34,12 @@ def _ecs_register_task_definition_with_image(*, ecs, family: str, container_name
             continue
         if str(c.get("name") or "") == container_name:
             c["image"] = image
+            # Keep runtime deploy aligned with Terraform/default pipeline expectations.
+            env_list = c.get("environment") or []
+            if not isinstance(env_list, list):
+                env_list = []
+            _upsert_env_var(env_list, name="REELCLAW_REFERENCE_ANALYSIS_MAX_SECONDS", value="0")
+            c["environment"] = env_list
 
     payload = _pick(
         td,
@@ -64,6 +80,13 @@ def _batch_register_job_definition_with_image(*, batch, name: str, image: str) -
     latest = max(defs, key=lambda d: int(d.get("revision") or 0))
     container_props = dict(latest.get("containerProperties") or {})
     container_props["image"] = image
+    env_list = container_props.get("environment") or []
+    if not isinstance(env_list, list):
+        env_list = []
+    # Ensure high-quality planning + full reference analysis (no cap).
+    _upsert_env_var(env_list, name="REELCLAW_REFERENCE_ANALYSIS_MAX_SECONDS", value="0")
+    _upsert_env_var(env_list, name="REASONING_EFFORT", value="high")
+    container_props["environment"] = env_list
 
     payload: dict[str, Any] = {
         "jobDefinitionName": name,
@@ -126,4 +149,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

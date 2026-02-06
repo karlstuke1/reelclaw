@@ -2995,7 +2995,30 @@ def main() -> int:
             learned_grader = None
             learned_grader_info = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-    if learned_grader is not None:
+    # Optional: pairwise ranker scores (learning-to-rank; primary selector when enabled).
+    pairwise_ranker = None
+    pairwise_ranker_info: dict[str, t.Any] | None = None
+    if pro_mode and shot_by_id and _truthy_env("VARIANT_PAIRWISE_RANKER", "1"):
+        try:
+            from .pairwise_ranker import PairwiseRanker
+
+            ranker_dir_env = str(
+                os.getenv("VARIANT_PAIRWISE_RANKER_DIR", "")
+                or os.getenv("FOLDER_EDIT_PAIRWISE_RANKER_DIR", "")
+                or os.getenv("PAIRWISE_RANKER_DIR", "")
+                or ""
+            ).strip()
+            ranker_dir: Path | None = None
+            if ranker_dir_env:
+                ranker_dir = Path(ranker_dir_env).expanduser().resolve()
+            if ranker_dir and ranker_dir.exists():
+                pairwise_ranker = PairwiseRanker.load(ranker_dir)
+                pairwise_ranker_info = {"ok": True, "ranker_dir": str(ranker_dir)}
+        except Exception as e:
+            pairwise_ranker = None
+            pairwise_ranker_info = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    if learned_grader is not None or pairwise_ranker is not None:
         try:
             # Build plan-specific segment lists (semantic features depend on desired_tags/story fields).
             segments_by_plan_id: dict[str, list[t.Any]] = {"default": list(ref_analysis.segments)}
@@ -3003,6 +3026,8 @@ def main() -> int:
                 segments_by_plan_id[str(pid)] = list(segs0 or [])
 
             preds: dict[str, dict[str, float]] = {}
+            fast_feats: dict[str, dict[str, float | None]] = {}
+            ranker_scores: dict[str, float] = {}
             for vid in vids:
                 try:
                     doc = json.loads((variants_dir / vid / "timeline.json").read_text(encoding="utf-8", errors="replace") or "{}")
@@ -3041,14 +3066,47 @@ def main() -> int:
                     stabilize_enabled=_truthy_env("FOLDER_EDIT_STABILIZE", "1"),
                     stabilize_shake_th=_float_env("FOLDER_EDIT_STEER_STABILIZE_SHAKE_TH", "0.25"),
                 )
-                pred = learned_grader.predict(feats)
-                preds[str(vid)] = pred
+                # Add per-variant diversity metrics (not available in no-render features).
                 try:
-                    variant_meta[vid]["learned_pred"] = pred
+                    feats = dict(feats)
+                    feats["min_jaccard_dist"] = _safe_float(variant_meta.get(vid, {}).get("min_jaccard_dist"))
+                    feats["uniq_assets"] = _safe_float(variant_meta.get(vid, {}).get("uniq_assets"))
                 except Exception:
                     pass
+                try:
+                    fast_feats[str(vid)] = t.cast(dict[str, float | None], feats)
+                except Exception:
+                    pass
+                if learned_grader is not None:
+                    pred = learned_grader.predict(feats)
+                    preds[str(vid)] = pred
+                    try:
+                        variant_meta[vid]["learned_pred"] = pred
+                    except Exception:
+                        pass
 
-            write_json(project_root / "learned_grader_predictions.json", {"schema_version": 1, "grader": learned_grader_info, "preds": preds})
+                # Optional: pairwise ranker score for primary ranking.
+                if pairwise_ranker is not None:
+                    try:
+                        rs = float(pairwise_ranker.score(feats))
+                        ranker_scores[str(vid)] = rs
+                        variant_meta[vid]["pairwise_ranker_score"] = rs
+                    except Exception:
+                        pass
+
+            if learned_grader_info is not None and preds:
+                write_json(project_root / "learned_grader_predictions.json", {"schema_version": 1, "grader": learned_grader_info, "preds": preds})
+            if fast_feats:
+                # JSONL so it's cheap to append/stream for dataset building.
+                lines = []
+                for vid in sorted(fast_feats.keys()):
+                    lines.append(json.dumps({"variant_id": vid, "features": fast_feats[vid]}, sort_keys=True))
+                (project_root / "fast_features.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            if pairwise_ranker_info is not None and ranker_scores:
+                write_json(
+                    project_root / "pairwise_ranker_scores.json",
+                    {"schema_version": 1, "ranker": pairwise_ranker_info, "scores": ranker_scores},
+                )
         except Exception:
             pass
 
@@ -3086,6 +3144,15 @@ def main() -> int:
                 score += (float(po) / 10.0) * float(_float_env("RANK_LEARNED_OVERALL_W", "0.12"))
             if ps is not None:
                 score += (float(ps) / 5.0) * float(_float_env("RANK_LEARNED_STABILITY_W", "0.06"))
+
+        # Pairwise ranker (if present): primary selector signal. This is a learned ordering
+        # over fast features; higher is better.
+        pr = _safe_float(m.get("pairwise_ranker_score"))
+        if pr is not None:
+            if _truthy_env("RANK_PAIRWISE_PRIMARY", "1"):
+                score += float(pr) * float(_float_env("RANK_PAIRWISE_PRIMARY_SCALE", "100.0"))
+            else:
+                score += float(pr) * float(_float_env("RANK_PAIRWISE_W", "2.5"))
         return float(score)
 
     ranked_vids = sorted(vids, key=lambda vid: _rank_score(variant_meta.get(vid, {})), reverse=True)
