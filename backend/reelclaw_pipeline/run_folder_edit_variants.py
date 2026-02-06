@@ -716,14 +716,18 @@ def _gemini_director_choose_shots(
             model=str(model),
             messages=messages,
             temperature=0.0,
-            max_tokens=int(float(os.getenv("VARIANT_GEMINI_DIRECTOR_MAX_TOKENS", "1800") or 1800)),
+            # Keep the token budget bounded: some reasoning-enabled endpoints will happily burn the
+            # entire max_tokens on internal reasoning and never emit the final JSON.
+            max_tokens=int(float(os.getenv("VARIANT_GEMINI_DIRECTOR_MAX_TOKENS", "900") or 900)),
             timeout_s=float(timeout_s),
             site_url=site_url,
             app_name=app_name,
             # Director selection must reliably return JSON. Reasoning output can consume
             # the token budget (finish_reason=length) and yield empty content.
-            include_reasoning=False,
-            reasoning={"effort": str(os.getenv("VARIANT_GEMINI_DIRECTOR_REASONING_EFFORT", "none") or "none").strip().lower()},
+            # Some Gemini endpoints require reasoning and/or behave inconsistently when reasoning is
+            # suppressed. We enable it and keep effort low; we still parse ONLY message.content.
+            include_reasoning=True,
+            reasoning={"effort": str(os.getenv("VARIANT_GEMINI_DIRECTOR_REASONING_EFFORT", "low") or "low").strip().lower()},
             retries=3,
             retry_delay_s=1.5,
             # `response_format` is provider-dependent and has caused empty-content failures on some

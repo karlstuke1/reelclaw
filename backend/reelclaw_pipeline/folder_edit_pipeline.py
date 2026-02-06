@@ -1648,6 +1648,25 @@ def run_folder_edit_pipeline(
         if music_doc:
             segments = _beat_snap_segments(segments=segments, duration_s=duration_s, music_doc=music_doc)
 
+    # Pro-mode uses a shot window (`shot_id`) to bound in-point selection and later Lane-A timing
+    # fixes. If the reference contains any long segments, ensure the shot index is allowed to
+    # produce windows long enough to render them (otherwise the optimizer can fail with
+    # "no feasible sequence" due to shot_dur < seg_dur).
+    if pro_mode:
+        try:
+            max_seg_dur = max(float(e) - float(s) for _sid, s, e in segments)
+        except Exception:
+            max_seg_dur = 0.0
+        if max_seg_dur > 0.0 and not str(os.getenv("SHOT_MAX_LEN_S", "") or "").strip():
+            try:
+                default_max = float(os.getenv("SHOT_MAX_LEN_S_DEFAULT", "4.0") or "4.0")
+            except Exception:
+                default_max = 4.0
+            # Add headroom, but keep bounded so we don't collapse all shots into a few huge windows.
+            new_max = min(12.0, max(float(default_max), float(max_seg_dur) * 1.15))
+            if new_max > float(default_max) + 1e-3:
+                os.environ["SHOT_MAX_LEN_S"] = f"{new_max:.2f}"
+
     # Extract frames per segment for analysis.
     # We keep a midpoint frame for downstream metrics/evaluation, and (optionally) multiple
     # frames across the segment for better VLM understanding of motion/intent.
@@ -4019,6 +4038,8 @@ def run_folder_edit_pipeline(
                 model=critic_model,
                 compare_video_path=review_compare,
                 timeline_summary=timeline_summary_for_critic,
+                niche=niche,
+                vibe=vibe,
                 critic_pro_mode=bool(critic_pro_mode),
                 max_mb=float(critic_max_mb),
                 tmp_dir=(review_dir / "tmp"),
