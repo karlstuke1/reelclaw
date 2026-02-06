@@ -9,13 +9,13 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg libgomp1 \
   && rm -rf /var/lib/apt/lists/*
 
-COPY backend/requirements.txt backend/requirements.worker.txt /app/backend/
+COPY requirements.txt requirements.worker.txt /app/backend/
 RUN pip install --no-cache-dir -r /app/backend/requirements.worker.txt \
   && pip install --no-cache-dir yt-dlp
 
 # Worker needs the backend + reel replication pipeline code (no image-gen modules).
-COPY backend/reelclaw_backend /app/backend/reelclaw_backend
-COPY backend/reelclaw_pipeline /app/backend/reelclaw_pipeline
+COPY reelclaw_backend /app/backend/reelclaw_backend
+COPY reelclaw_pipeline /app/backend/reelclaw_pipeline
 
 ENV PYTHONPATH=/app/backend
 

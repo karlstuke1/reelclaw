@@ -5,11 +5,11 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-COPY backend/requirements.txt /app/backend/requirements.txt
+COPY requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
 # Copy only what the API needs.
-COPY backend/reelclaw_backend /app/backend/reelclaw_backend
+COPY reelclaw_backend /app/backend/reelclaw_backend
 
 ENV PYTHONPATH=/app/backend
 

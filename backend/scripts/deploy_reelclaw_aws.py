@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 import urllib.request
+import shutil
+import time
 from pathlib import Path
 
 
@@ -70,6 +72,36 @@ def _ecr_login(*, region: str, registry: str, env: dict[str, str]) -> None:
     )
 
 
+def _docker_has_ecr_helper() -> bool:
+    # Homebrew formula: docker-credential-helper-ecr
+    # Binary: docker-credential-ecr-login
+    return shutil.which("docker-credential-ecr-login") is not None
+
+
+def _ensure_isolated_docker_config(*, registry: str, env: dict[str, str], docker_auth: str) -> None:
+    """
+    Keep deploy runs deterministic and avoid interacting with Docker Desktop credential stores
+    by using an isolated DOCKER_CONFIG directory.
+    """
+    cfg = env.get("DOCKER_CONFIG")
+    if not cfg:
+        cfg = str(Path("/tmp") / f"reelclaw_deploy_docker_config_{int(time.time())}")
+        env["DOCKER_CONFIG"] = cfg
+
+    cfg_dir = Path(cfg)
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = cfg_dir / "config.json"
+    config: dict[str, object] = {"auths": {}}
+
+    if docker_auth == "ecr-helper":
+        # Use the credential helper so we never need `docker login` (which can hang on some macOS
+        # setups due to credential-store UI prompts).
+        config["credHelpers"] = {registry: "ecr-login"}
+
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+
 def _terraform_backend_args(*, bucket: str, key: str, region: str, dynamodb_table: str) -> list[str]:
     return [
         "-reconfigure",
@@ -107,6 +139,12 @@ def main() -> int:
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--tag", default="latest")
     parser.add_argument("--env-file", default=".env.production")
+    parser.add_argument(
+        "--docker-auth",
+        choices=["auto", "login", "ecr-helper"],
+        default="auto",
+        help="How to authenticate Docker to ECR. 'ecr-helper' requires docker-credential-ecr-login.",
+    )
     parser.add_argument("--skip-docker", action="store_true", help="Skip docker build/push.")
     parser.add_argument("--skip-terraform", action="store_true", help="Skip terraform apply.")
     parser.add_argument("--skip-ecs", action="store_true", help="Skip ECS force-new-deployment/wait.")
@@ -130,7 +168,19 @@ def main() -> int:
     worker_repo = f"{registry}/reelclaw-{args.env}-worker"
 
     if not args.skip_docker:
-        _ecr_login(region=args.region, registry=registry, env=env)
+        docker_auth = args.docker_auth
+        if docker_auth == "auto":
+            docker_auth = "ecr-helper" if _docker_has_ecr_helper() else "login"
+
+        if docker_auth == "ecr-helper" and not _docker_has_ecr_helper():
+            raise RuntimeError(
+                "Missing docker-credential-ecr-login. Install with: brew install docker-credential-helper-ecr"
+            )
+
+        _ensure_isolated_docker_config(registry=registry, env=env, docker_auth=docker_auth)
+
+        if docker_auth == "login":
+            _ecr_login(region=args.region, registry=registry, env=env)
         _run(
             [
                 "docker",
@@ -141,7 +191,7 @@ def main() -> int:
                 "backend/Dockerfile.api",
                 "-t",
                 f"{api_repo}:{args.tag}",
-                ".",
+                "backend",
             ],
             cwd=root,
             env=env,
@@ -156,7 +206,7 @@ def main() -> int:
                 "backend/Dockerfile.worker",
                 "-t",
                 f"{worker_repo}:{args.tag}",
-                ".",
+                "backend",
             ],
             cwd=root,
             env=env,
