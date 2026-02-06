@@ -723,10 +723,12 @@ def _gemini_director_choose_shots(
             # Director selection must reliably return JSON. Reasoning output can consume
             # the token budget (finish_reason=length) and yield empty content.
             include_reasoning=False,
-            reasoning={"effort": "minimal"},
+            reasoning={"effort": str(os.getenv("VARIANT_GEMINI_DIRECTOR_REASONING_EFFORT", "none") or "none").strip().lower()},
             retries=3,
             retry_delay_s=1.5,
-            extra_body={"response_format": {"type": "json_object"}},
+            # `response_format` is provider-dependent and has caused empty-content failures on some
+            # OpenRouter backends (finish_reason=length but content=""). Default to OFF for reliability.
+            extra_body=({"response_format": {"type": "json_object"}} if _truthy_env("VARIANT_GEMINI_DIRECTOR_RESPONSE_FORMAT", "0") else None),
         )
         last_text = result.content or ""
         last_raw = result.raw if isinstance(result.raw, dict) else None
