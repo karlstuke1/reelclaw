@@ -47,6 +47,10 @@ Notes:
 
 - Cookies are **best-effort** by default. If the secret is missing/empty, the worker will try to download without cookies and only fail if the source requires login.
 - To fail fast when cookies are missing/misconfigured, set `REELCLAW_YTDLP_COOKIES_REQUIRED=1` in the worker environment.
+- If Instagram blocks cloud IPs in your region/account, you can route `yt-dlp` through a proxy:
+  - `REELCLAW_YTDLP_PROXY` (explicit proxy URL) or `REELCLAW_YTDLP_PROXY_SECRET_ID` (Secrets Manager id holding proxy URL)
+  - Or set `OXYLABS_PROXY_USERNAME` / `OXYLABS_PROXY_PASSWORD` (+ host/port/protocol) to reuse Oxylabs-style config
+  - To fail fast when proxy is required for Instagram, set `REELCLAW_YTDLP_PROXY_REQUIRED=1`
 
 To set/update it, export a `cookies.txt` from a browser where you’re logged in, then run:
 

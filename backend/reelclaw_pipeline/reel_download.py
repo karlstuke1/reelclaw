@@ -16,6 +16,151 @@ def _truthy_env(name: str, default: str = "0") -> bool:
     return raw not in {"0", "false", "no", "off", ""}
 
 
+def _redact_proxy_url(proxy_url: str) -> str:
+    s = str(proxy_url or "").strip()
+    if not s:
+        return ""
+    try:
+        parsed = urlparse(s)
+    except Exception:
+        parsed = None  # type: ignore[assignment]
+    if not parsed or not getattr(parsed, "hostname", None):
+        # Best-effort fallback: hide userinfo if present.
+        if "@" in s and "//" in s:
+            return s.split("//", 1)[0] + "//" + s.split("@", 1)[-1]
+        return s
+
+    if not (getattr(parsed, "username", None) or getattr(parsed, "password", None)):
+        return s
+
+    host = str(parsed.hostname or "")
+    port = f":{parsed.port}" if getattr(parsed, "port", None) else ""
+    user = str(parsed.username or "")
+    if user:
+        netloc = f"{user}:***@{host}{port}"
+    else:
+        netloc = f"{host}{port}"
+    # Preserve scheme/path/query fragments while redacting credentials.
+    return parsed._replace(netloc=netloc).geturl()  # type: ignore[attr-defined]
+
+
+def _redact_cmd(cmd: list[str]) -> list[str]:
+    out: list[str] = []
+    i = 0
+    while i < len(cmd):
+        part = cmd[i]
+        if part == "--proxy":
+            out.append(part)
+            if i + 1 < len(cmd):
+                out.append(_redact_proxy_url(cmd[i + 1]))
+                i += 2
+                continue
+        if isinstance(part, str) and part.startswith("--proxy="):
+            out.append("--proxy=" + _redact_proxy_url(part[len("--proxy=") :]))
+            i += 1
+            continue
+        out.append(part)
+        i += 1
+    return out
+
+
+def _aws_region() -> str:
+    return os.getenv("REELCLAW_AWS_REGION", "").strip() or os.getenv("AWS_REGION", "").strip() or "us-east-1"
+
+
+def _read_secret_string(secret_id: str) -> str:
+    import boto3  # type: ignore
+
+    sm = boto3.client("secretsmanager", region_name=_aws_region())
+    resp = sm.get_secret_value(SecretId=secret_id)
+    return str(resp.get("SecretString") or "").strip()
+
+
+def _resolve_oxylabs_proxy_url() -> str:
+    """
+    Build an Oxylabs proxy URL from environment variables (compatible with /Users/work/Desktop/instauto).
+
+    Supported env vars:
+      - OXYLABS_PROXY_PROTOCOL (default: http)
+      - OXYLABS_PROXY_HOST (default: pr.oxylabs.io)
+      - OXYLABS_PROXY_PORT (default: 7777)
+      - OXYLABS_PROXY_USERNAME
+      - OXYLABS_PROXY_USERNAME_TEMPLATE (supports {accountId}, {jobId}, {username})
+      - OXYLABS_PROXY_PASSWORD
+    """
+    password = os.getenv("OXYLABS_PROXY_PASSWORD", "").strip()
+    if not password:
+        return ""
+
+    username = os.getenv("OXYLABS_PROXY_USERNAME", "").strip()
+    template = os.getenv("OXYLABS_PROXY_USERNAME_TEMPLATE", "").strip()
+    if template:
+        account_id = os.getenv("REELCLAW_USER_ID", "").strip() or os.getenv("REELCLAW_JOB_ID", "").strip()
+        job_id = os.getenv("REELCLAW_JOB_ID", "").strip()
+        user_id = os.getenv("REELCLAW_USER_ID", "").strip()
+        rendered = (
+            template.replace("{accountId}", account_id)
+            .replace("{jobId}", job_id)
+            .replace("{username}", user_id)
+        )
+        # If unknown placeholders remain, do not guess.
+        if "{" not in rendered and "}" not in rendered:
+            username = rendered.strip()
+
+    if not username:
+        return ""
+
+    protocol = os.getenv("OXYLABS_PROXY_PROTOCOL", "").strip() or "http"
+    host = os.getenv("OXYLABS_PROXY_HOST", "").strip() or "pr.oxylabs.io"
+    port = os.getenv("OXYLABS_PROXY_PORT", "").strip() or "7777"
+    if not host or not port:
+        return ""
+    return f"{protocol}://{username}:{password}@{host}:{port}"
+
+
+def _resolve_proxy_url(*, required: bool) -> str:
+    """
+    Resolve a proxy URL to use with yt-dlp.
+
+    Supported env vars:
+      - REELCLAW_YTDLP_PROXY / YTDLP_PROXY: explicit proxy URL (ex: http://user:pass@host:port)
+      - REELCLAW_YTDLP_PROXY_SECRET_ID / YTDLP_PROXY_SECRET_ID: Secrets Manager id holding proxy URL
+      - DEFAULT_PROXY_URL / IG_PROXY: common proxy vars (supported by instauto)
+      - OXYLABS_PROXY_*: build a proxy URL from Oxylabs creds (supported by instauto)
+    """
+    direct = os.getenv("REELCLAW_YTDLP_PROXY", "").strip() or os.getenv("YTDLP_PROXY", "").strip()
+    if direct:
+        return direct
+
+    secret_id = os.getenv("REELCLAW_YTDLP_PROXY_SECRET_ID", "").strip() or os.getenv("YTDLP_PROXY_SECRET_ID", "").strip()
+    if secret_id:
+        try:
+            value = _read_secret_string(secret_id)
+            if value:
+                return value
+            if required:
+                raise RuntimeError(f"Proxy secret is empty: {secret_id}. Set it to a proxy URL string.")
+        except Exception as exc:
+            if required:
+                exc_name = type(exc).__name__
+                if exc_name == "ResourceNotFoundException":
+                    raise RuntimeError(
+                        f"Proxy secret has no value set (AWSCURRENT missing): {secret_id}. Set it to a proxy URL string."
+                    ) from exc
+                if exc_name == "AccessDeniedException":
+                    raise RuntimeError(
+                        f"Access denied reading proxy secret {secret_id}. Verify Batch IAM role has secretsmanager:GetSecretValue."
+                    ) from exc
+                raise RuntimeError(
+                    f"Failed to read proxy secret {secret_id}. Verify Batch role permissions and secret value. ({exc_name})"
+                ) from exc
+    # Common names used by other repos/tools.
+    common = os.getenv("DEFAULT_PROXY_URL", "").strip() or os.getenv("IG_PROXY", "").strip()
+    if common:
+        return common
+    return _resolve_oxylabs_proxy_url()
+
+
 def _run(cmd: list[str], *, timeout_s: float) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
     if result.returncode != 0:
@@ -24,7 +169,7 @@ def _run(cmd: list[str], *, timeout_s: float) -> None:
         tail = stderr or stdout or "unknown error"
         if len(tail) > 2000:
             tail = tail[-2000:]
-        raise RuntimeError(f"Command failed (exit {result.returncode}): {' '.join(cmd)}\n{tail}")
+        raise RuntimeError(f"Command failed (exit {result.returncode}): {' '.join(_redact_cmd(cmd))}\n{tail}")
 
 
 def _is_instagram_url(url: str) -> bool:
@@ -69,8 +214,7 @@ def _maybe_write_cookies_file(output_dir: Path, *, required: bool = False) -> Pa
             try:
                 import boto3  # type: ignore
 
-                region = os.getenv("REELCLAW_AWS_REGION", "").strip() or os.getenv("AWS_REGION", "").strip() or "us-east-1"
-                sm = boto3.client("secretsmanager", region_name=region)
+                sm = boto3.client("secretsmanager", region_name=_aws_region())
                 resp = sm.get_secret_value(SecretId=secret_id)
                 raw_b64 = str(resp.get("SecretString") or "").strip()
                 if not raw_b64:
@@ -158,6 +302,13 @@ def download_reel(url: str, *, output_dir: Path, timeout_s: float = 180.0) -> Pa
     # but fall back to "best" if the source doesn't offer MP4.
     fmt = os.getenv("YTDLP_FORMAT", "").strip() or "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
 
+    # Routing through a proxy can help reliability for some sources (notably Instagram) from
+    # cloud IP ranges. This is best-effort by default.
+    proxy_required = _is_instagram_url(url) and (
+        _truthy_env("REELCLAW_YTDLP_PROXY_REQUIRED", "0") or _truthy_env("YTDLP_PROXY_REQUIRED", "0")
+    )
+    proxy_url = _resolve_proxy_url(required=proxy_required)
+
     # Cookies can help reliability (especially on AWS IP ranges), but should be best-effort by default.
     # If you want to fail-fast when cookies are missing/misconfigured, set:
     #   REELCLAW_YTDLP_COOKIES_REQUIRED=1
@@ -177,6 +328,8 @@ def download_reel(url: str, *, output_dir: Path, timeout_s: float = 180.0) -> Pa
         "--fragment-retries",
         os.getenv("YTDLP_FRAGMENT_RETRIES", "").strip() or "3",
     ]
+    if proxy_url:
+        cmd += ["--proxy", proxy_url]
     if cookies_file is not None:
         cmd += ["--cookies", str(cookies_file)]
     cmd += [
