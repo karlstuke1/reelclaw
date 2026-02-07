@@ -17,10 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ENV: prod
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-      AWS_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-      API_BASE_URL: ${{ vars.API_BASE_URL }}
+      # Prefer GitHub Actions repository variables when set, but provide stable fallbacks so
+      # deploys don't fail in new environments.
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID || '909487698049' }}
+      AWS_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::909487698049:role/reelclaw-prod-github-deploy' }}
+      API_BASE_URL: ${{ vars.API_BASE_URL || 'https://y8uexiqu08.execute-api.us-east-1.amazonaws.com' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -73,4 +75,3 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsS "${API_BASE_URL%/}/healthz"
-
