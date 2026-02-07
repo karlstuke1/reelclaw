@@ -43,6 +43,11 @@ The worker is already wired to read a Netscape-format `cookies.txt` from AWS Sec
 - `reelclaw-prod/ytdlp_cookies` (prod)
 - `reelclaw-staging/ytdlp_cookies` (staging)
 
+Notes:
+
+- Cookies are **best-effort** by default. If the secret is missing/empty, the worker will try to download without cookies and only fail if the source requires login.
+- To fail fast when cookies are missing/misconfigured, set `REELCLAW_YTDLP_COOKIES_REQUIRED=1` in the worker environment.
+
 To set/update it, export a `cookies.txt` from a browser where you’re logged in, then run:
 
 ```bash

@@ -11,6 +11,11 @@ from urllib.parse import urlparse
 _VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 
 
+def _truthy_env(name: str, default: str = "0") -> bool:
+    raw = os.getenv(name, default).strip().lower()
+    return raw not in {"0", "false", "no", "off", ""}
+
+
 def _run(cmd: list[str], *, timeout_s: float) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
     if result.returncode != 0:
@@ -55,6 +60,11 @@ def _maybe_write_cookies_file(output_dir: Path, *, required: bool = False) -> Pa
         if not raw_b64:
             secret_id = os.getenv("REELCLAW_YTDLP_COOKIES_SECRET_ID", "").strip() or os.getenv("YTDLP_COOKIES_SECRET_ID", "").strip()
             if not secret_id:
+                if required:
+                    raise RuntimeError(
+                        "Cookies are required but not configured. "
+                        "Set REELCLAW_YTDLP_COOKIES_SECRET_ID (Secrets Manager id) or REELCLAW_YTDLP_COOKIES_B64 / REELCLAW_YTDLP_COOKIES."
+                    )
                 return None
             try:
                 import boto3  # type: ignore
@@ -148,8 +158,12 @@ def download_reel(url: str, *, output_dir: Path, timeout_s: float = 180.0) -> Pa
     # but fall back to "best" if the source doesn't offer MP4.
     fmt = os.getenv("YTDLP_FORMAT", "").strip() or "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
 
-    secret_id = os.getenv("REELCLAW_YTDLP_COOKIES_SECRET_ID", "").strip() or os.getenv("YTDLP_COOKIES_SECRET_ID", "").strip()
-    cookies_required = _is_instagram_url(url) and bool(secret_id)
+    # Cookies can help reliability (especially on AWS IP ranges), but should be best-effort by default.
+    # If you want to fail-fast when cookies are missing/misconfigured, set:
+    #   REELCLAW_YTDLP_COOKIES_REQUIRED=1
+    cookies_required = _is_instagram_url(url) and (
+        _truthy_env("REELCLAW_YTDLP_COOKIES_REQUIRED", "0") or _truthy_env("YTDLP_COOKIES_REQUIRED", "0")
+    )
     cookies_file = _maybe_write_cookies_file(output_dir, required=cookies_required)
 
     cmd = [
