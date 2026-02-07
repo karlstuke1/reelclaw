@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -150,7 +151,16 @@ class ListJobsResponse(BaseModel):
 
 class VariantsResponse(BaseModel):
     job_id: str
-    variants: list[dict[str, Any]]
+
+    class VariantSummary(BaseModel):
+        id: str
+        title: str
+        # iOS expects a Double; keep this always numeric to avoid decode failures.
+        score: float = 0.0
+        video_url: str
+        thumbnail_url: str | None = None
+
+    variants: list[VariantSummary]
 
 
 class RegisterDeviceRequest(BaseModel):
@@ -1054,11 +1064,23 @@ def get_variants(job_id: str, request: Request, user_id: str = Depends(require_u
                 if thumb_key
                 else None
             )
+            score = 0.0
+            try:
+                raw_score = v.get("score")
+                if raw_score is None or isinstance(raw_score, bool):
+                    score = 0.0
+                else:
+                    score = float(raw_score)
+                    if not math.isfinite(score):
+                        score = 0.0
+            except Exception:
+                score = 0.0
+            score = float(max(0.0, min(10.0, score)))
             variants.append(
                 {
                     "id": vid,
                     "title": v.get("title") or f"Variation {vid.lstrip('v')}",
-                    "score": v.get("score"),
+                    "score": score,
                     "video_url": video_url,
                     "thumbnail_url": thumb_url,
                 }
@@ -1103,11 +1125,12 @@ def get_variants(job_id: str, request: Request, user_id: str = Depends(require_u
     for p in sorted(finals_dir.glob("v*.mov")) + sorted(finals_dir.glob("v*.mp4")):
         vid = p.stem
         video_url = request.url_for("variant_video", job_id=job_id, variant_id=vid)
+        score = float(score_by_id.get(vid)) if score_by_id.get(vid) is not None else 0.0
         variants.append(
             {
                 "id": vid,
                 "title": f"Variation {vid.lstrip('v')}",
-                "score": score_by_id.get(vid),
+                "score": float(max(0.0, min(10.0, score))),
                 "video_url": str(video_url),
                 "thumbnail_url": None,
             }
