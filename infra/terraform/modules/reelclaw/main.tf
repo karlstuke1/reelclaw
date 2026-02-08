@@ -302,6 +302,10 @@ resource "aws_secretsmanager_secret" "ytdlp_proxy_url" {
   name = "${local.name}/ytdlp_proxy_url"
 }
 
+resource "aws_secretsmanager_secret" "apify_token" {
+  name = "${local.name}/apify_token"
+}
+
 ############################
 # Networking (minimal VPC)
 ############################
@@ -886,7 +890,8 @@ resource "aws_iam_policy" "worker_task" {
         Resource = [
           aws_secretsmanager_secret.openrouter_api_key.arn,
           aws_secretsmanager_secret.ytdlp_cookies.arn,
-          aws_secretsmanager_secret.ytdlp_proxy_url.arn
+          aws_secretsmanager_secret.ytdlp_proxy_url.arn,
+          aws_secretsmanager_secret.apify_token.arn
         ]
       }
     ]
@@ -949,6 +954,7 @@ resource "aws_batch_job_definition" "worker" {
       { name = "REELCLAW_REFERENCE_ANALYSIS_MAX_SECONDS", value = "25" },
       { name = "REELCLAW_YTDLP_COOKIES_SECRET_ID", value = aws_secretsmanager_secret.ytdlp_cookies.name },
       { name = "REELCLAW_YTDLP_PROXY_SECRET_ID", value = aws_secretsmanager_secret.ytdlp_proxy_url.name },
+      { name = "REELCLAW_APIFY_TOKEN_SECRET_ID", value = aws_secretsmanager_secret.apify_token.name },
       { name = "REASONING_EFFORT", value = "low" }
     ]
 

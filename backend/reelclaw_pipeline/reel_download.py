@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import shutil
 import subprocess
+import urllib.request
+import urllib.error
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -312,7 +315,93 @@ def _maybe_write_cookies_file(output_dir: Path, *, required: bool = False) -> Pa
     return dst
 
 
+def _resolve_apify_token() -> str:
+    """Resolve Apify API token from env or Secrets Manager."""
+    direct = os.getenv("REELCLAW_APIFY_TOKEN", "").strip() or os.getenv("APIFY_TOKEN", "").strip()
+    if direct:
+        return direct
+    secret_id = os.getenv("REELCLAW_APIFY_TOKEN_SECRET_ID", "").strip()
+    if secret_id:
+        try:
+            return _read_secret_string(secret_id)
+        except Exception:
+            return ""
+    return ""
+
+
+def _download_via_apify(reel_url: str, *, output_dir: Path, timeout_s: float = 300.0) -> Path | None:
+    """
+    Download an Instagram reel via Apify's Instagram Reel Scraper API.
+    Returns the downloaded video path, or None if Apify is not configured or fails.
+    """
+    token = _resolve_apify_token()
+    if not token:
+        return None
+
+    actor_id = "apify~instagram-reel-scraper"
+    api_url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync-get-dataset-items"
+    body = json.dumps({
+        "username": ["instagram"],  # required by schema; directUrls is what matters
+        "directUrls": [reel_url],
+        "resultsLimit": 1,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(api_url, data=body, method="POST")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            items = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        print(f"[apify] API call failed: {type(exc).__name__}: {exc}")
+        return None
+
+    if not items or not isinstance(items, list):
+        print("[apify] No results returned")
+        return None
+
+    video_url = items[0].get("videoUrl") or ""
+    if not video_url:
+        print(f"[apify] No videoUrl in result (keys: {list(items[0].keys())[:10]})")
+        return None
+
+    # Download the video file
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dst = output_dir / "reel_source.mp4"
+    try:
+        vid_req = urllib.request.Request(video_url)
+        with urllib.request.urlopen(vid_req, timeout=120) as vid_resp:
+            with open(dst, "wb") as f:
+                while True:
+                    chunk = vid_resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+    except Exception as exc:
+        print(f"[apify] Video download failed: {type(exc).__name__}: {exc}")
+        try:
+            dst.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
+
+    if not dst.exists() or dst.stat().st_size < 1000:
+        print(f"[apify] Downloaded file too small or missing: {dst}")
+        return None
+
+    print(f"[apify] Downloaded reel to {dst} ({dst.stat().st_size} bytes)")
+    return dst
+
+
 def download_reel(url: str, *, output_dir: Path, timeout_s: float = 180.0) -> Path:
+    # For Instagram URLs, try Apify first (works from any IP, no cookies needed).
+    if _is_instagram_url(url):
+        apify_result = _download_via_apify(url, output_dir=output_dir, timeout_s=min(timeout_s, 300.0))
+        if apify_result is not None:
+            return apify_result
+        print("[download] Apify fallback: trying yt-dlp...")
+
     ytdlp = os.getenv("YTDLP", "").strip() or shutil.which("yt-dlp")
     if not ytdlp:
         for candidate in ("/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp"):
