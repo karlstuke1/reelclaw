@@ -8,6 +8,7 @@ struct VariantsView: View {
     @State private var isLoading: Bool = true
     @State private var errorMessage: String?
     @State private var variants: [VariantsResponse.Variant] = []
+    @StateObject private var saveAllManager = SaveAllManager()
 
     private let columns: [GridItem] = [
         GridItem(.adaptive(minimum: 170), spacing: 12, alignment: .top),
@@ -58,6 +59,19 @@ struct VariantsView: View {
             }
         }
         .navigationTitle("Variations")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    saveAllManager.start(variants: variants)
+                } label: {
+                    Label("Save All", systemImage: "square.and.arrow.down.on.square")
+                }
+                .disabled(isLoading || errorMessage != nil || variants.isEmpty || saveAllManager.isRunning)
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            SaveAllStatusBar(manager: saveAllManager)
+        }
         .task {
             await load()
         }
@@ -81,6 +95,95 @@ struct VariantsView: View {
                 return
             }
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+}
+
+private struct SaveAllStatusBar: View {
+    @ObservedObject var manager: SaveAllManager
+
+    var body: some View {
+        if shouldShowBar {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(titleText)
+                        .font(.headline)
+                    Spacer()
+                    trailingButtons
+                }
+
+                if let permissionError = manager.permissionError, !permissionError.isEmpty {
+                    Text(permissionError)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ProgressView(value: Double(manager.processedCount), total: Double(max(1, manager.totalCount)))
+                        .progressViewStyle(.linear)
+
+                    Text(detailText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(12)
+            .background(.ultraThinMaterial)
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color(.separator).opacity(0.18), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+        }
+    }
+
+    private var shouldShowBar: Bool {
+        manager.isRunning || manager.hasFinished || manager.permissionError != nil
+    }
+
+    private var titleText: String {
+        if manager.permissionError != nil {
+            return "Save All"
+        }
+        if manager.isRunning {
+            return "Saving to Photos…"
+        }
+        if manager.failedCount > 0 {
+            return "Saved with Issues"
+        }
+        return "Saved"
+    }
+
+    private var detailText: String {
+        if manager.isRunning {
+            return "\(manager.processedCount)/\(manager.totalCount)"
+        }
+        if manager.failedCount > 0 {
+            return "\(manager.doneCount) saved • \(manager.failedCount) failed"
+        }
+        return "\(manager.doneCount) saved"
+    }
+
+    @ViewBuilder
+    private var trailingButtons: some View {
+        if manager.isRunning {
+            Button("Cancel") {
+                manager.cancel()
+            }
+            .buttonStyle(.bordered)
+        } else {
+            HStack(spacing: 10) {
+                if manager.failedCount > 0 {
+                    Button("Retry") {
+                        manager.retryFailed()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                Button("Dismiss") {
+                    manager.dismiss()
+                }
+                .buttonStyle(.bordered)
+            }
         }
     }
 }

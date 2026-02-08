@@ -298,6 +298,10 @@ resource "aws_secretsmanager_secret" "ytdlp_cookies" {
   name = "${local.name}/ytdlp_cookies"
 }
 
+resource "aws_secretsmanager_secret" "ytdlp_proxy_url" {
+  name = "${local.name}/ytdlp_proxy_url"
+}
+
 ############################
 # Networking (minimal VPC)
 ############################
@@ -679,7 +683,8 @@ resource "aws_iam_policy" "api_task" {
           "secretsmanager:GetSecretValue"
         ]
         Resource = [
-          aws_secretsmanager_secret.jwt_secret.arn
+          aws_secretsmanager_secret.jwt_secret.arn,
+          aws_secretsmanager_secret.ytdlp_cookies.arn
         ]
       }
     ]
@@ -719,7 +724,8 @@ resource "aws_ecs_task_definition" "api" {
         { name = "REELCLAW_ENABLE_APNS", value = tostring(var.enable_apns) },
         { name = "REELCLAW_SNS_PLATFORM_APPLICATION_ARN", value = var.apns_platform_application_arn },
         { name = "REELCLAW_REFERENCE_ANALYSIS_MAX_SECONDS", value = "25" },
-        { name = "REELCLAW_APPLE_AUDIENCE", value = var.apple_audience }
+        { name = "REELCLAW_APPLE_AUDIENCE", value = var.apple_audience },
+        { name = "REELCLAW_YTDLP_COOKIES_SECRET_ID", value = aws_secretsmanager_secret.ytdlp_cookies.name }
       ]
       secrets = [
         { name = "REELCLAW_JWT_SECRET", valueFrom = aws_secretsmanager_secret.jwt_secret.arn }
@@ -879,7 +885,8 @@ resource "aws_iam_policy" "worker_task" {
         ]
         Resource = [
           aws_secretsmanager_secret.openrouter_api_key.arn,
-          aws_secretsmanager_secret.ytdlp_cookies.arn
+          aws_secretsmanager_secret.ytdlp_cookies.arn,
+          aws_secretsmanager_secret.ytdlp_proxy_url.arn
         ]
       }
     ]
@@ -941,6 +948,7 @@ resource "aws_batch_job_definition" "worker" {
       { name = "REELCLAW_SNS_PLATFORM_APPLICATION_ARN", value = var.apns_platform_application_arn },
       { name = "REELCLAW_REFERENCE_ANALYSIS_MAX_SECONDS", value = "25" },
       { name = "REELCLAW_YTDLP_COOKIES_SECRET_ID", value = aws_secretsmanager_secret.ytdlp_cookies.name },
+      { name = "REELCLAW_YTDLP_PROXY_SECRET_ID", value = aws_secretsmanager_secret.ytdlp_proxy_url.name },
       { name = "REASONING_EFFORT", value = "low" }
     ]
 

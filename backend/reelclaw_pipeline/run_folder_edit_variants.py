@@ -42,6 +42,10 @@ from .folder_edit_pipeline import (  # type: ignore
     _smooth_grade_step,
 )
 
+REF_REUSE_ASSET_ID = "__reference_reel__"
+REF_REUSE_SEQUENCE_GROUP_ID = "reference_reel"
+REF_REUSE_DIRECTOR_SOURCE = "ref_reuse"
+
 
 def _load_api_key() -> str | None:
     key = os.getenv("OPENROUTER_API_KEY", "").strip()
@@ -349,7 +353,7 @@ def _load_variant_asset_set(variant_dir: Path) -> set[str]:
             if not isinstance(s, dict):
                 continue
             aid = str(s.get("asset_id") or "").strip()
-            if aid:
+            if aid and aid != REF_REUSE_ASSET_ID:
                 out.add(aid)
         return out
     except Exception:
@@ -870,6 +874,12 @@ def main() -> int:
     ap.add_argument("--niche", default=str(os.getenv("FOLDER_EDIT_NICHE", "") or ""), help="Optional niche/topic hint (used by story planning).")
     ap.add_argument("--vibe", default=str(os.getenv("FOLDER_EDIT_VIBE", "") or ""), help="Optional vibe/tonal hint (used by story planning).")
     ap.add_argument("--ref", help="Reference image path (identity anchor; optional)")
+    ap.add_argument(
+        "--ref-reuse-pct",
+        type=float,
+        default=float(os.getenv("FOLDER_EDIT_REF_REUSE_PCT", "0") or 0),
+        help="Percent (0..100) of segments to reuse directly from the reference reel (keep original reference clips).",
+    )
     ap.add_argument("--model", default=os.getenv("DIRECTOR_MODEL", "google/gemini-3-pro-preview"))
     ap.add_argument("--variants", type=int, default=100)
     ap.add_argument(
@@ -1295,6 +1305,26 @@ def main() -> int:
             encoding="utf-8",
         )
 
+    # Optional: reuse some reference segments directly in the output (keep original reference clips).
+    ref_reuse_pct_raw = float(getattr(args, "ref_reuse_pct", 0.0) or 0.0)
+    # Be forgiving: allow 0<value<1 to mean a ratio (e.g., 0.7 == 70%).
+    if 0.0 < ref_reuse_pct_raw < 1.0:
+        ref_reuse_pct_raw = ref_reuse_pct_raw * 100.0
+    ref_reuse_pct = float(max(0.0, min(100.0, ref_reuse_pct_raw)))
+    ref_reuse_seg_ids: set[int] = set()
+    if ref_reuse_pct > 0.0 and (ref_analysis.segments or []):
+        seg_ids_all = [int(getattr(s, "id", 0) or 0) for s in ref_analysis.segments if int(getattr(s, "id", 0) or 0) > 0]
+        nseg = len(seg_ids_all)
+        if nseg > 0:
+            keep_n = int(round((ref_reuse_pct / 100.0) * float(nseg)))
+            if keep_n <= 0:
+                keep_n = 1
+            keep_n = min(nseg, keep_n)
+            rrng = random.Random(int(args.seed) + 4242)
+            rrng.shuffle(seg_ids_all)
+            ref_reuse_seg_ids = set(seg_ids_all[:keep_n])
+            print(f"[info] Reference reuse enabled: keeping {len(ref_reuse_seg_ids)}/{nseg} segments ({ref_reuse_pct:.1f}%).", flush=True)
+
     # 4) Index + tag media folder once.
     index_path = library_dir / "media_index.json"
     use_cache = _truthy_env("FOLDER_EDIT_MEDIA_INDEX_CACHE", "1")
@@ -1481,6 +1511,38 @@ def main() -> int:
         assets_for_planner.append(meta)
         asset_by_id[a.id] = meta
 
+    # Reference reuse: add the reference reel itself as a synthetic "asset" so the renderer can
+    # cut directly from it for selected segments.
+    if ref_reuse_seg_ids:
+        try:
+            ref_asset_path = src_path.resolve()
+        except Exception:
+            ref_asset_path = src_path
+        if ref_asset_path.exists():
+            ref_dur_s = None
+            try:
+                ref_dur_s = max(float(e) for _sid, _s, e in (segments or []))
+            except Exception:
+                ref_dur_s = None
+            ref_meta = {
+                "id": REF_REUSE_ASSET_ID,
+                "kind": "video",
+                "path": str(ref_asset_path),
+                "duration_s": (float(ref_dur_s) if isinstance(ref_dur_s, (int, float)) else None),
+                "luma_mean": None,
+                "luma_min": None,
+                "luma_max": None,
+                "dark_frac": None,
+                "dark_frac_min": None,
+                "dark_frac_max": None,
+                "motion_score": None,
+            }
+            assets_for_planner.append(ref_meta)
+            asset_by_id[REF_REUSE_ASSET_ID] = ref_meta
+        else:
+            print(f"[warn] --ref-reuse-pct requested but reference reel file is missing: {ref_asset_path}", flush=True)
+            ref_reuse_seg_ids = set()
+
     # 5) Generate variants.
     params = VariantParams(tau=float(args.tau), top_n=int(args.top_n), inpoint_top_k=int(args.inpoint_top_k))
     use_auto_grade = _truthy_env("FOLDER_EDIT_AUTO_GRADE", "1")
@@ -1526,6 +1588,37 @@ def main() -> int:
         if exclude_basenames:
             shots = [s for s in shots if Path(str(s.get("asset_path") or "")).name not in exclude_basenames]
             shot_by_id = {str(s.get("id") or ""): s for s in shots if str(s.get("id") or "")}
+
+        # Reference reuse: register synthetic per-segment "shots" that cut directly from the
+        # reference reel. These are *not* added to the candidate pool; they're only selected
+        # when --ref-reuse-pct requests it.
+        if ref_reuse_seg_ids:
+            ref_meta0 = asset_by_id.get(REF_REUSE_ASSET_ID) or {}
+            ref_asset_path0 = Path(str(ref_meta0.get("path") or ""))
+            for seg in ref_analysis.segments:
+                sid = int(getattr(seg, "id", 0) or 0)
+                if sid <= 0 or sid not in ref_reuse_seg_ids:
+                    continue
+                shot_id = f"refseg_{sid}"
+                if shot_id in shot_by_id:
+                    continue
+                shot_by_id[shot_id] = {
+                    "id": shot_id,
+                    "asset_id": REF_REUSE_ASSET_ID,
+                    "asset_path": str(ref_asset_path0) if ref_asset_path0.exists() else str(ref_meta0.get("path") or ""),
+                    "sequence_group_id": REF_REUSE_SEQUENCE_GROUP_ID,
+                    "start_s": float(getattr(seg, "start_s", 0.0) or 0.0),
+                    "end_s": float(getattr(seg, "end_s", 0.0) or 0.0),
+                    "duration_s": float(getattr(seg, "duration_s", 0.0) or 0.0),
+                    "motion_score": None,
+                    "shake_score": None,
+                    "sharpness": None,
+                    "luma_mean": getattr(seg, "ref_luma", None),
+                    "dark_frac": getattr(seg, "ref_dark_frac", None),
+                    "rgb_mean": getattr(seg, "ref_rgb_mean", None),
+                    "cam_motion_mag": None,
+                    "cam_motion_angle_deg": None,
+                }
 
         # Optional: story planner (agentic storyline over the library).
         if _truthy_env("FOLDER_EDIT_STORY_PLANNER", "0"):
@@ -1772,11 +1865,17 @@ def main() -> int:
         # while still enforcing cross-variant diversity (Jaccard distance vs prior_sets).
         best_ok: tuple[float, list[dict[str, t.Any]], set[str]] | None = None  # (min_dist, decisions, aset)
         best_deg: tuple[float, list[dict[str, t.Any]], set[str]] | None = None  # fallback if the library is truly tiny
+        best: tuple[float, list[dict[str, t.Any]], set[str]] | None = None  # direct accept (e.g., gemini director)
         available_video_assets = 0
         try:
-            available_video_assets = sum(1 for m in asset_by_id.values() if str(m.get("kind") or "video") == "video")
+            # Reference reuse adds a synthetic asset; exclude it from diversity heuristics.
+            available_video_assets = sum(
+                1
+                for aid0, m in asset_by_id.items()
+                if str(aid0) != REF_REUSE_ASSET_ID and str(m.get("kind") or "video") == "video"
+            )
         except Exception:
-            available_video_assets = len(asset_by_id)
+            available_video_assets = len([k for k in asset_by_id.keys() if str(k) != REF_REUSE_ASSET_ID])
         for attempt in range(max_retries):
             rng = random.Random((base_seed * 1000) + attempt)
             used: set[str] = set()
@@ -1890,6 +1989,21 @@ def main() -> int:
 
                     for seg in segments_for_variant:
                         sid = int(seg.id)
+                        if ref_reuse_seg_ids and int(sid) in ref_reuse_seg_ids:
+                            # Keep this segment from the reference reel.
+                            decisions_try.append(
+                                {
+                                    "segment_id": seg.id,
+                                    "asset_id": REF_REUSE_ASSET_ID,
+                                    "shot_id": f"refseg_{sid}",
+                                    "in_s": float(getattr(seg, "start_s", 0.0) or 0.0),
+                                    "speed": 1.0,
+                                    "crop_mode": "center",
+                                    "ref_reuse": True,
+                                    "director_source": REF_REUSE_DIRECTOR_SOURCE,
+                                }
+                            )
+                            continue
                         shot_id = str(by_sid.get(int(sid)) or "").strip()
                         cands_for_seg = [c for c in (cand_map.get(int(sid)) or []) if isinstance(c, dict)]
                         if not shot_id:
@@ -2038,7 +2152,11 @@ def main() -> int:
                         )
                         decisions_try = []
                     else:
-                        aset = {str(d.get("asset_id") or "") for d in decisions_try if str(d.get("asset_id") or "").strip()}
+                        aset = {
+                            str(d.get("asset_id") or "").strip()
+                            for d in decisions_try
+                            if str(d.get("asset_id") or "").strip() and str(d.get("asset_id") or "").strip() != REF_REUSE_ASSET_ID
+                        }
                         best = (1.0, decisions_try, aset)
                         break
 
@@ -2063,6 +2181,22 @@ def main() -> int:
                     picked = rng.choices(beam_items, weights=weights, k=1)[0]
                     shot_ids = [str(x) for x in (picked.get("shot_ids") or [])]
                     for seg, sid in zip(segments_for_variant, shot_ids, strict=False):
+                        if ref_reuse_seg_ids and int(getattr(seg, "id", 0) or 0) in ref_reuse_seg_ids:
+                            sid0 = int(getattr(seg, "id", 0) or 0)
+                            decisions_try.append(
+                                {
+                                    "segment_id": seg.id,
+                                    "asset_id": REF_REUSE_ASSET_ID,
+                                    "shot_id": f"refseg_{sid0}",
+                                    "in_s": float(getattr(seg, "start_s", 0.0) or 0.0),
+                                    "speed": 1.0,
+                                    "crop_mode": "center",
+                                    "ref_reuse": True,
+                                    "director_source": REF_REUSE_DIRECTOR_SOURCE,
+                                }
+                            )
+                            used_shots.add(f"refseg_{sid0}")
+                            continue
                         shot = shot_by_id.get(str(sid))
                         if not isinstance(shot, dict):
                             # Fallback: top candidate for this segment.
@@ -2148,6 +2282,24 @@ def main() -> int:
                 prev_sem_run = 0
                 prev_seg: t.Any | None = None
                 for seg in segments_for_variant:
+                    if ref_reuse_seg_ids and int(getattr(seg, "id", 0) or 0) in ref_reuse_seg_ids:
+                        sid0 = int(getattr(seg, "id", 0) or 0)
+                        decisions_try.append(
+                            {
+                                "segment_id": seg.id,
+                                "asset_id": REF_REUSE_ASSET_ID,
+                                "shot_id": (f"refseg_{sid0}" if pro_mode else ""),
+                                "in_s": float(getattr(seg, "start_s", 0.0) or 0.0),
+                                "speed": 1.0,
+                                "crop_mode": "center",
+                                "ref_reuse": True,
+                                "director_source": REF_REUSE_DIRECTOR_SOURCE,
+                            }
+                        )
+                        prev_seg = seg
+                        prev_sem = None
+                        prev_sem_run = 0
+                        continue
                     if pro_mode:
                         if plan_id and plan_id in shot_candidates_by_seg_by_plan:
                             shortlist = list((shot_candidates_by_seg_by_plan.get(plan_id) or {}).get(int(seg.id)) or [])
@@ -2187,6 +2339,24 @@ def main() -> int:
                         if pool_unique:
                             pool = pool_unique
 
+                        # Guard: it is possible for `pool` to become empty after filters when the
+                        # library/shortlist is very small or the per-variant `used_shots` set has
+                        # already consumed all viable options.
+                        if not pool:
+                            # Fall back to the broader shortlist for this segment (allowing repeats as
+                            # a last resort) so the pipeline doesn't crash.
+                            if plan_id and plan_id in shot_candidates_by_seg_by_plan:
+                                shortlist2 = list((shot_candidates_by_seg_by_plan.get(plan_id) or {}).get(int(seg.id)) or [])
+                            else:
+                                shortlist2 = list(shot_candidates_by_seg.get(int(seg.id)) or [])
+                            pool = [s for s in shortlist2 if isinstance(s, dict)]
+                            if not pool:
+                                # No candidates at all for this segment; skip it (rare).
+                                prev_seg = seg
+                                prev_sem = None
+                                prev_sem_run = 0
+                                continue
+
                         # Weighted pick by rank with cross-variant usage penalty (tracked by asset_id).
                         weights: list[float] = []
                         denom = max(0.25, float(params.tau))
@@ -2221,6 +2391,12 @@ def main() -> int:
                                 + (float(consec_u) * float(consec_pen))
                             )
                             weights.append(math.exp(-eff_rank / denom))
+                        if not weights:
+                            # Defensive: if pool was empty or all rows were malformed, skip.
+                            prev_seg = seg
+                            prev_sem = None
+                            prev_sem_run = 0
+                            continue
                         chosen = rng.choices(pool, weights=weights, k=1)[0]
                         shot_id = str(chosen.get("id") or "")
                         aid = str(chosen.get("asset_id") or "")
@@ -2292,7 +2468,11 @@ def main() -> int:
                         )
                         prev_seg = seg
 
-            aset = {str(d.get("asset_id") or "") for d in decisions_try if str(d.get("asset_id") or "").strip()}
+            aset = {
+                str(d.get("asset_id") or "").strip()
+                for d in decisions_try
+                if str(d.get("asset_id") or "").strip() and str(d.get("asset_id") or "").strip() != REF_REUSE_ASSET_ID
+            }
             uniq_assets = len(aset)
             degenerate = bool(available_video_assets >= 2 and uniq_assets <= 1)
 
@@ -2314,7 +2494,8 @@ def main() -> int:
             if (not prior_sets) or (min_jaccard_dist <= 0.0) or (float(md) >= float(min_jaccard_dist)):
                 break
 
-        best = best_ok or best_deg
+        if best is None:
+            best = best_ok or best_deg
         if best is None:
             raise RuntimeError("No feasible variant decisions were produced (empty candidate pool).")
         min_dist, decisions, aset = best
@@ -2333,6 +2514,13 @@ def main() -> int:
         for seg in segments_for_variant:
             dec = next((d for d in decisions if int(d["segment_id"]) == int(seg.id)), None)
             if not dec:
+                continue
+            if bool(dec.get("ref_reuse")) or str(dec.get("asset_id") or "") == REF_REUSE_ASSET_ID:
+                # Keep the original reference segment timing exactly; do not re-pick an inpoint.
+                t0 = float(getattr(seg, "start_s", 0.0) or 0.0)
+                dec["in_s"] = t0
+                dec["speed"] = 1.0
+                inpoint_meta_by_seg[int(seg.id)] = {"locked": True, "time_s": t0}
                 continue
             aid = str(dec.get("asset_id") or "")
             meta = asset_by_id.get(aid) or {}
@@ -2454,6 +2642,8 @@ def main() -> int:
             meta = asset_by_id.get(aid) or {}
             asset_path = Path(str(meta.get("path") or ""))
             asset_kind = str(meta.get("kind") or "video")
+            is_ref_reuse = bool(dec.get("ref_reuse")) or (aid == REF_REUSE_ASSET_ID)
+            burn_overlay_seg = bool(burn_overlays) and (not is_ref_reuse)
 
             grade: dict[str, float] | None = None
             chosen_info = (inpoint_meta_by_seg.get(int(seg.id)) or {}).get("chosen") or {}
@@ -2469,7 +2659,7 @@ def main() -> int:
                     out_frame_path = Path(fp).expanduser()
             except Exception:
                 out_frame_path = None
-            if use_auto_grade:
+            if use_auto_grade and (not is_ref_reuse):
                 # Optional multi-frame sampling across the segment window to reduce grade noise and flicker.
                 if asset_kind == "video" and asset_path.exists() and _truthy_env("FOLDER_EDIT_GRADE_MULTI_SAMPLE", "1"):
                     try:
@@ -2607,8 +2797,8 @@ def main() -> int:
                 shot0 = None
 
             stabilize = False
-            zoom = _float_env("FOLDER_EDIT_ZOOM", "1.0")
-            if asset_kind == "video" and _truthy_env("FOLDER_EDIT_STABILIZE", "1"):
+            zoom = 1.0 if is_ref_reuse else _float_env("FOLDER_EDIT_ZOOM", "1.0")
+            if (not is_ref_reuse) and asset_kind == "video" and _truthy_env("FOLDER_EDIT_STABILIZE", "1"):
                 # Prefer shake_score when available; motion proxy is last resort.
                 shake_score = None
                 if isinstance(shot0, dict):
@@ -2637,7 +2827,7 @@ def main() -> int:
                         zoom = max(zoom, _float_env("FOLDER_EDIT_STABILIZE_ZOOM", "1.08"))
 
             # Optional: small punch-in on high-energy segments to reduce "too wide/static" feel.
-            if _truthy_env("FOLDER_EDIT_ENERGY_PUNCHIN", "0"):
+            if (not is_ref_reuse) and _truthy_env("FOLDER_EDIT_ENERGY_PUNCHIN", "0"):
                 try:
                     e = getattr(seg, "music_energy", None)
                     energy = float(e) if isinstance(e, (int, float)) else float(_segment_energy_hint(seg.duration_s))
@@ -2671,7 +2861,7 @@ def main() -> int:
                 fade_out_s=fade_out_s,
                 fade_out_color=fade_out_color,
                 output_path=out_path,
-                burn_overlay=burn_overlays,
+                burn_overlay=burn_overlay_seg,
                 timeout_s=timeout_s,
             )
             segment_paths.append(out_path)
@@ -2854,6 +3044,8 @@ def main() -> int:
             "analysis_clip": str(analysis_clip),
             "media_folder": str(media_folder),
             "reference_image": str(Path(args.ref)) if args.ref else None,
+            "reference_reuse_pct": float(ref_reuse_pct) if ref_reuse_pct > 0.0 else 0.0,
+            "reference_reuse_segment_ids": sorted(ref_reuse_seg_ids) if ref_reuse_seg_ids else [],
             "beat_sync": bool(beat_sync_used),
             "music_analysis": str(music_analysis_path) if (beat_sync_used and music_analysis_path.exists()) else None,
             "story_plan_id": plan_id,

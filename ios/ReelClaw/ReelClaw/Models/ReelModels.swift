@@ -55,6 +55,9 @@ struct CreateJobRequest: Encodable {
     let reference: ReferenceSpec
     let variations: Int
     let burnOverlays: Bool
+    // Percent (0..100) of segments to keep directly from the reference reel.
+    // When nil/0, the backend uses only the user's clips.
+    let referenceReusePct: Double?
     let director: VariantDirector?
     let clips: [ClipSpec]
 }

@@ -160,6 +160,111 @@ def _tail_text(path: Path, *, max_chars: int = 2400) -> str:
     return raw[-max_chars:]
 
 
+
+
+def _summarize_openrouter_usage(path: Path) -> dict[str, Any] | None:
+    # Best-effort: read OpenRouter usage JSONL (written by reelclaw_pipeline.openrouter_client)
+    # and aggregate totals per job. Never fail the worker if this breaks.
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    if not raw.strip():
+        return None
+
+    total_calls = 0
+    total_image_parts = 0
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+    cost_usd: float | None = None
+
+    by_model: dict[str, dict[str, Any]] = {}
+
+    for ln in raw.splitlines():
+        s = (ln or "").strip()
+        if not s:
+            continue
+        try:
+            rec = json.loads(s)
+        except Exception:
+            continue
+        if not isinstance(rec, dict):
+            continue
+
+        model = str(rec.get("model") or "").strip() or "(unknown)"
+        usage = rec.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
+
+        total_calls += 1
+        try:
+            total_image_parts += int(rec.get("image_parts") or 0)
+        except Exception:
+            total_image_parts += 0
+
+        pt = usage.get("prompt_tokens")
+        ct = usage.get("completion_tokens")
+        tt = usage.get("total_tokens")
+        try:
+            prompt_tokens += int(pt or 0)
+        except Exception:
+            pass
+        try:
+            completion_tokens += int(ct or 0)
+        except Exception:
+            pass
+        try:
+            total_tokens += int(tt or 0)
+        except Exception:
+            pass
+
+        c = rec.get("cost_usd")
+        try:
+            if c is not None:
+                cost_usd = float(cost_usd or 0.0) + float(c)
+        except Exception:
+            pass
+
+        m = by_model.get(model)
+        if not m:
+            m = {
+                "calls": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "image_parts": 0,
+                "cost_usd": None,
+            }
+            by_model[model] = m
+
+        m["calls"] = int(m.get("calls") or 0) + 1
+        m["image_parts"] = int(m.get("image_parts") or 0) + int(rec.get("image_parts") or 0)
+        m["prompt_tokens"] = int(m.get("prompt_tokens") or 0) + int(pt or 0)
+        m["completion_tokens"] = int(m.get("completion_tokens") or 0) + int(ct or 0)
+        m["total_tokens"] = int(m.get("total_tokens") or 0) + int(tt or 0)
+        try:
+            if c is not None:
+                m["cost_usd"] = float(m.get("cost_usd") or 0.0) + float(c)
+        except Exception:
+            pass
+
+    if total_calls <= 0:
+        return None
+
+    out: dict[str, Any] = {
+        "openrouter_calls": int(total_calls),
+        "image_parts": int(total_image_parts),
+        "prompt_tokens": int(prompt_tokens),
+        "completion_tokens": int(completion_tokens),
+        "total_tokens": int(total_tokens),
+        "models": by_model,
+    }
+    if cost_usd is not None:
+        out["cost_usd"] = float(cost_usd)
+    return out
 def _load_final_scores(finals_dir: Path) -> dict[str, float]:
     """
     Best-effort: load finals_manifest.json and produce a per-final normalized score (0..10).
@@ -272,6 +377,13 @@ def main() -> int:
 
     variations = max(1, int(job.get("variations") or 3))
     burn_overlays = bool(job.get("burn_overlays") or False)
+    reference_reuse_pct = 0.0
+    try:
+        raw_pct = job.get("reference_reuse_pct")
+        reference_reuse_pct = float(raw_pct) if raw_pct is not None else 0.0
+    except Exception:
+        reference_reuse_pct = 0.0
+    reference_reuse_pct = float(max(0.0, min(100.0, reference_reuse_pct)))
     director = str(job.get("director") or "").strip().lower() or None
     if director not in {"code", "gemini", "auto"}:
         director = None
@@ -402,8 +514,12 @@ def main() -> int:
         cmd.extend(["--director", str(director)])
     if burn_overlays:
         cmd.append("--burn-overlays")
+    if reference_reuse_pct > 0.0:
+        cmd.extend(["--ref-reuse-pct", str(reference_reuse_pct)])
 
     run_env = os.environ.copy()
+    usage_path = logs_dir / "openrouter_usage.jsonl"
+    run_env["REELCLAW_OPENROUTER_USAGE_PATH"] = str(usage_path)
     run_env["PYTHONPATH"] = str(backend_root) + (os.pathsep + run_env["PYTHONPATH"] if run_env.get("PYTHONPATH") else "")
     if pro_mode:
         _apply_pro_defaults(run_env)
@@ -444,16 +560,26 @@ def main() -> int:
                 )
             time.sleep(1.5)
 
+        llm_usage = _summarize_openrouter_usage(usage_path)
+
         rc = int(proc.returncode or 0)
         produced = _count_variants(finals_dir)
         if rc != 0:
             tail = _tail_text(log_path)
+            err_code = f"exit_{rc}"
             msg = f"Pipeline exited with code {rc}."
+            if "HTTP 402" in (tail or ""):
+                err_code = "openrouter_402"
+                msg = "OpenRouter credits depleted (HTTP 402). Top up credits or reduce pro settings (e.g., SHOT_TAG_MAX / director)."
             # If the pipeline surfaced a human-friendly error, bubble it up.
-            for line in reversed(tail.splitlines()):
+            for line in reversed((tail or "").splitlines()):
                 s = line.strip()
                 if not s:
                     continue
+                if "HTTP 402" in s or ("OpenRouter" in s and "402" in s):
+                    err_code = "openrouter_402"
+                    msg = "OpenRouter credits depleted (HTTP 402). Top up credits or reduce pro settings (e.g., SHOT_TAG_MAX / director)."
+                    break
                 if (
                     "Reference download blocked" in s
                     or "REELCLAW_YTDLP_COOKIES_B64" in s
@@ -463,27 +589,29 @@ def main() -> int:
                 ):
                     msg = s[:240]
                     break
-            _update_job(
-                jobs,
-                env.job_id,
-                status="failed",
-                stage="Failed",
-                message=msg,
-                error_code=f"exit_{rc}",
-                error_detail=tail or f"See worker log at {log_path.name}",
-            )
+            update_kwargs: dict[str, Any] = {
+                "status": "failed",
+                "stage": "Failed",
+                "message": msg,
+                "error_code": err_code,
+                "error_detail": tail or f"See worker log at {log_path.name}",
+            }
+            if llm_usage is not None:
+                update_kwargs["llm_usage"] = llm_usage
+            _update_job(jobs, env.job_id, **update_kwargs)
             return 1
         if produced <= 0:
             tail = _tail_text(log_path)
-            _update_job(
-                jobs,
-                env.job_id,
-                status="failed",
-                stage="No outputs",
-                message="Pipeline finished but produced no variants.",
-                error_code="no_outputs",
-                error_detail=tail or f"See worker log at {log_path.name}",
-            )
+            update_kwargs: dict[str, Any] = {
+                "status": "failed",
+                "stage": "No outputs",
+                "message": "Pipeline finished but produced no variants.",
+                "error_code": "no_outputs",
+                "error_detail": tail or f"See worker log at {log_path.name}",
+            }
+            if llm_usage is not None:
+                update_kwargs["llm_usage"] = llm_usage
+            _update_job(jobs, env.job_id, **update_kwargs)
             return 1
 
     _update_job(
@@ -551,6 +679,7 @@ def main() -> int:
         stage="Done",
         message="Your variations are ready.",
         variants=variants,
+        llm_usage=llm_usage,
         progress_current=min(produced, variations),
         progress_total=variations,
         error_code=None,

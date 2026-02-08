@@ -1,6 +1,6 @@
 import Foundation
 
-enum AppTab: Hashable {
+enum AppTab: String, Hashable {
     case create
     case jobs
     case settings
@@ -8,7 +8,11 @@ enum AppTab: Hashable {
 
 @MainActor
 final class AppRouter: ObservableObject {
-    @Published var selectedTab: AppTab = .create
+    @Published var selectedTab: AppTab = AppRouter.restoreSelectedTab() {
+        didSet {
+            AppRouter.persistSelectedTab(selectedTab)
+        }
+    }
     @Published var pendingJobIdToOpen: String?
 
     init() {
@@ -24,10 +28,18 @@ final class AppRouter: ObservableObject {
         }
     }
 
+    private static func restoreSelectedTab() -> AppTab {
+        let raw = UserDefaults.standard.string(forKey: UserDefaultsKeys.selectedTab) ?? ""
+        return AppTab(rawValue: raw) ?? .create
+    }
+
+    private static func persistSelectedTab(_ tab: AppTab) {
+        UserDefaults.standard.setValue(tab.rawValue, forKey: UserDefaultsKeys.selectedTab)
+    }
+
     func consumePendingJobIdToOpen() -> String? {
         let id = pendingJobIdToOpen
         pendingJobIdToOpen = nil
         return id
     }
 }
-

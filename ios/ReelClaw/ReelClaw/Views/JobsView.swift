@@ -107,7 +107,7 @@ struct JobsView: View {
                 await load()
                 openPendingJobIfAny()
             }
-            .onChange(of: router.pendingJobIdToOpen) { _ in
+            .onChange(of: router.pendingJobIdToOpen) {
                 openPendingJobIfAny()
             }
         }

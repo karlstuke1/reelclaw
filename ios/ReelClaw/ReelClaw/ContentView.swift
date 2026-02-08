@@ -6,28 +6,40 @@
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 
 struct ContentView: View {
     @EnvironmentObject private var session: SessionStore
+    @EnvironmentObject private var recentReferences: RecentReferenceStore
 
     @State private var path: [String] = []
 
     private enum ReferenceMode: String, CaseIterable, Identifiable, Hashable {
-        case link = "Link"
-        case upload = "Upload"
+        case link
+        case upload
 
         var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .link:
+                return "Link"
+            case .upload:
+                return "Upload"
+            }
+        }
     }
 
-    @State private var referenceMode: ReferenceMode = .link
-    @State private var referenceLink: String = ""
+    @AppStorage(UserDefaultsKeys.createReferenceMode) private var referenceModeRaw: String = ReferenceMode.link.rawValue
+    @AppStorage(UserDefaultsKeys.createReferenceLink) private var referenceLink: String = ""
     @State private var referencePickerItem: PhotosPickerItem?
     @State private var referenceClip: PickedClip?
 
-    @State private var burnOverlays: Bool = false
-    @State private var compressBeforeUpload: Bool = true
-    @State private var variations: Int = 3
-    @State private var director: VariantDirector = .code
+    @AppStorage(UserDefaultsKeys.createBurnOverlays) private var burnOverlays: Bool = false
+    @AppStorage(UserDefaultsKeys.createCompressBeforeUpload) private var compressBeforeUpload: Bool = true
+    @AppStorage(UserDefaultsKeys.createVariations) private var variations: Int = 3
+    @AppStorage(UserDefaultsKeys.createDirector) private var directorRaw: String = VariantDirector.code.rawValue
+    @AppStorage(UserDefaultsKeys.createReferenceReusePct) private var referenceReusePct: Double = 0
     @State private var showAdvanced: Bool = false
     @State private var submitStatus: String?
 
@@ -43,8 +55,35 @@ struct ContentView: View {
     @State private var isSubmitting: Bool = false
     @State private var errorMessage: String?
 
+    @State private var previewClip: PickedClip?
+    @State private var showRecentReferences: Bool = false
+
     private var readyClips: [PickedClip] {
         clipSlots.compactMap { $0 }
+    }
+
+    private var referenceMode: ReferenceMode {
+        get { ReferenceMode(rawValue: referenceModeRaw) ?? .link }
+        set { referenceModeRaw = newValue.rawValue }
+    }
+
+    private var referenceModeBinding: Binding<ReferenceMode> {
+        Binding(
+            get: { referenceMode },
+            set: { referenceModeRaw = $0.rawValue }
+        )
+    }
+
+    private var director: VariantDirector {
+        get { VariantDirector(rawValue: directorRaw) ?? .code }
+        set { directorRaw = newValue.rawValue }
+    }
+
+    private var directorBinding: Binding<VariantDirector> {
+        Binding(
+            get: { director },
+            set: { directorRaw = $0.rawValue }
+        )
     }
 
     var body: some View {
@@ -68,6 +107,14 @@ struct ContentView: View {
             .sheet(isPresented: $showAdvanced) {
                 advancedSheet
             }
+            .sheet(isPresented: $showRecentReferences) {
+                RecentReferencesSheet { url in
+                    referenceLink = url
+                }
+            }
+            .sheet(item: $previewClip) { clip in
+                ClipPreviewSheet(clip: clip)
+            }
         }
         .task(id: pickerItems) {
             await loadPickerItems()
@@ -83,9 +130,9 @@ struct ContentView: View {
     private var referenceSection: some View {
         GroupBox("Reference") {
             VStack(alignment: .leading, spacing: 12) {
-                Picker("Reference", selection: $referenceMode) {
+                Picker("Reference", selection: referenceModeBinding) {
                     ForEach(ReferenceMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
+                        Text(mode.title).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -95,6 +142,10 @@ struct ContentView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+
+                    if !recentReferences.items.isEmpty {
+                        recentReferencesRow
+                    }
                 } else {
                     PhotosPicker(selection: $referencePickerItem, matching: .videos) {
                         Label(referenceClip == nil ? "Select reference video" : "Change reference video", systemImage: "film")
@@ -124,6 +175,49 @@ struct ContentView: View {
         }
     }
 
+    private var recentReferencesRow: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Recent")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("See all") {
+                    showRecentReferences = true
+                }
+                .font(.footnote)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(recentReferences.items.prefix(12)) { ref in
+                        Button {
+                            referenceLink = ref.url
+                            recentReferences.record(url: ref.url)
+                        } label: {
+                            RecentReferenceChip(reference: ref)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                UIPasteboard.general.string = ref.url
+                            } label: {
+                                Label("Copy URL", systemImage: "doc.on.doc")
+                            }
+
+                            Button(role: .destructive) {
+                                recentReferences.remove(id: ref.id)
+                            } label: {
+                                Label("Remove", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
     private var clipsSection: some View {
         GroupBox("Your Clips") {
             VStack(alignment: .leading, spacing: 12) {
@@ -148,33 +242,34 @@ struct ContentView: View {
                     Text("No clips selected yet.")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(clipSlots.indices, id: \.self) { idx in
-                        HStack {
+                    Text("\(readyClips.count) clip\(readyClips.count == 1 ? "" : "s") selected")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 92), spacing: 10, alignment: .top)],
+                        spacing: 10
+                    ) {
+                        ForEach(clipSlots.indices, id: \.self) { idx in
                             if let clip = clipSlots[idx] {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(clip.filename)
-                                        .lineLimit(1)
-                                    Text(clip.durationLabel)
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
+                                Button {
+                                    previewClip = clip
+                                } label: {
+                                    SelectedClipTileView(clip: clip, index: idx)
                                 }
+                                .buttonStyle(.plain)
                             } else {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Preparing clip \(idx + 1)…")
-                                        .foregroundStyle(.secondary)
-                                    Text("This step imports from Photos (not uploading yet).")
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                }
+                                selectedClipPlaceholder(index: idx)
                             }
-                            Spacer()
                         }
                     }
+
                     Button("Clear clips", role: .destructive) {
                         ClipDraftStore.clear()
                         clipSlots = []
                         pickerItems = []
                         hasUserPickedClips = false
+                        previewClip = nil
                         isImportingClips = false
                         importedClipCount = 0
                         importTotal = 0
@@ -182,6 +277,23 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func selectedClipPlaceholder(index: Int) -> some View {
+        VStack(spacing: 8) {
+            ProgressView()
+            Text("Clip \(index + 1)")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .aspectRatio(1, contentMode: .fit)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color(.separator).opacity(0.18), lineWidth: 1)
+        )
     }
 
     private var optionsSection: some View {
@@ -220,7 +332,11 @@ struct ContentView: View {
         let edits = "\(variations) edit" + (variations == 1 ? "" : "s")
         let compress = compressBeforeUpload ? "Compress on" : "Compress off"
         let captions = burnOverlays ? "Burn captions on" : "Burn captions off"
-        return "\(edits) • \(director.title) • \(compress) • \(captions)"
+        var parts = [edits, director.title, compress, captions]
+        if referenceReusePct >= 1 {
+            parts.append("Ref keep \(Int(referenceReusePct))%")
+        }
+        return parts.joined(separator: " • ")
     }
 
     private var createEstimateText: String {
@@ -281,7 +397,7 @@ struct ContentView: View {
                 }
 
                 Section("Director") {
-                    Picker("Director", selection: $director) {
+                    Picker("Director", selection: directorBinding) {
                         ForEach(VariantDirector.allCases) { d in
                             Text(d.title).tag(d)
                         }
@@ -292,6 +408,25 @@ struct ContentView: View {
                     Text(director.subtitle)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+
+                Section("Reference") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Keep reference clips")
+                            Spacer()
+                            Text("\(Int(referenceReusePct))%")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Slider(value: $referenceReusePct, in: 0...100, step: 5)
+                            .disabled(isSubmitting)
+
+                        Text("Reuse some segments directly from the reference reel in the output. 0% means everything is cut from your clips.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("Media") {
@@ -502,6 +637,7 @@ struct ContentView: View {
 
             var referenceSpec: ReferenceSpec
             var referenceFileURL: URL?
+            var referenceURLToRecord: String?
             switch referenceMode {
             case .link:
                 var raw = referenceLink.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -512,6 +648,7 @@ struct ContentView: View {
                     throw APIError.network("Please paste a valid http(s) URL (or switch to Upload).")
                 }
                 referenceSpec = ReferenceSpec(type: .url, url: url.absoluteString, filename: nil, contentType: nil, bytes: nil, sha256: nil)
+                referenceURLToRecord = url.absoluteString
             case .upload:
                 guard let clip = referenceClip else { throw APIError.network("Missing reference video.") }
                 submitStatus = "Preparing reference…"
@@ -537,10 +674,14 @@ struct ContentView: View {
                     reference: referenceSpec,
                     variations: variations,
                     burnOverlays: burnOverlays,
+                    referenceReusePct: referenceReusePct >= 1 ? referenceReusePct : nil,
                     director: director,
                     clips: preparedClips.map { ClipSpec(filename: $0.filename, contentType: $0.contentType, bytes: $0.bytes, sha256: $0.sha256) }
                 )
             )
+            if let referenceURLToRecord {
+                recentReferences.record(url: referenceURLToRecord)
+            }
 
             if let refTarget = job.referenceUpload, refTarget.alreadyUploaded != true {
                 guard let referenceFileURL, let refCT = referenceSpec.contentType else {
@@ -669,5 +810,6 @@ struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
         ContentView()
             .environmentObject(SessionStore())
+            .environmentObject(RecentReferenceStore())
     }
 }

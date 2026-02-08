@@ -25,5 +25,6 @@ struct MainView_Previews: PreviewProvider {
         MainView()
             .environmentObject(SessionStore())
             .environmentObject(AppRouter())
+            .environmentObject(RecentReferenceStore())
     }
 }

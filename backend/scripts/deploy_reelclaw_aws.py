@@ -123,6 +123,47 @@ def _terraform_output(env_dir: Path, name: str, *, env: dict[str, str]) -> str:
     return raw
 
 
+def _resolve_ecs_task_definition_arn(*, family: str, image_tag: str, env: dict[str, str], max_scan: int = 20) -> str | None:
+    """
+    Resolve the ACTIVE task definition ARN matching `image_tag`.
+
+    We can't rely on `--force-new-deployment` alone because it does not change the service's task definition,
+    so it will keep running whatever revision the service is currently pinned to.
+    """
+    raw = _capture(
+        [
+            "aws",
+            "ecs",
+            "list-task-definitions",
+            "--family-prefix",
+            family,
+            "--sort",
+            "DESC",
+            "--output",
+            "json",
+        ],
+        env=env,
+    )
+    arns = list(json.loads(raw).get("taskDefinitionArns") or [])
+    if not arns:
+        return None
+
+    want_suffix = f":{image_tag}"
+    for arn in arns[: max(1, int(max_scan))]:
+        raw_td = _capture(
+            ["aws", "ecs", "describe-task-definition", "--task-definition", arn, "--output", "json"], env=env
+        )
+        td = (json.loads(raw_td).get("taskDefinition") or {})
+        for cdef in td.get("containerDefinitions") or []:
+            image = str(cdef.get("image") or "")
+            image_no_digest = image.split("@", 1)[0]
+            if image_no_digest.endswith(want_suffix):
+                return arn
+
+    # Fall back to the latest active revision if none match (e.g. user used --skip-terraform).
+    return arns[0]
+
+
 def _smoke_test_healthz(api_base_url: str) -> None:
     url = api_base_url.rstrip("/") + "/healthz"
     print("+ GET", url)
@@ -253,17 +294,21 @@ def main() -> int:
     if not args.skip_ecs:
         cluster = f"reelclaw-{args.env}"
         service = f"reelclaw-{args.env}-api"
+        task_definition_arn = _resolve_ecs_task_definition_arn(family=service, image_tag=args.tag, env=env)
+        update_cmd = [
+            "aws",
+            "ecs",
+            "update-service",
+            "--cluster",
+            cluster,
+            "--service",
+            service,
+            "--force-new-deployment",
+        ]
+        if task_definition_arn:
+            update_cmd += ["--task-definition", task_definition_arn]
         _run(
-            [
-                "aws",
-                "ecs",
-                "update-service",
-                "--cluster",
-                cluster,
-                "--service",
-                service,
-                "--force-new-deployment",
-            ],
+            update_cmd,
             env=env,
         )
         _run(["aws", "ecs", "wait", "services-stable", "--cluster", cluster, "--services", service], env=env)

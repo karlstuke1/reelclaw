@@ -18,4 +18,15 @@ enum AppConfig {
 enum UserDefaultsKeys {
     static let apiBaseURL = "apiBaseURL"
     static let recentJobs = "recentJobs"
+    static let recentReferences = "recentReferences"
+    static let selectedTab = "ui.selectedTab"
+
+    static let createReferenceMode = "create.referenceMode"
+    static let createReferenceLink = "create.referenceLink"
+    static let createReferenceUpload = "create.referenceUpload"
+    static let createVariations = "create.variations"
+    static let createDirector = "create.director"
+    static let createCompressBeforeUpload = "create.compressBeforeUpload"
+    static let createBurnOverlays = "create.burnOverlays"
+    static let createReferenceReusePct = "create.referenceReusePct"
 }

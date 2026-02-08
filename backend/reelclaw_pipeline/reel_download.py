@@ -118,6 +118,16 @@ def _resolve_oxylabs_proxy_url() -> str:
     return f"{protocol}://{username}:{password}@{host}:{port}"
 
 
+def _is_valid_proxy_url(url: str) -> bool:
+    """Reject placeholder/malformed proxy URLs like ``http://:@:``."""
+    try:
+        parsed = urlparse(str(url or "").strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").strip()
+    return bool(host)
+
+
 def _resolve_proxy_url(*, required: bool) -> str:
     """
     Resolve a proxy URL to use with yt-dlp.
@@ -129,17 +139,17 @@ def _resolve_proxy_url(*, required: bool) -> str:
       - OXYLABS_PROXY_*: build a proxy URL from Oxylabs creds (supported by instauto)
     """
     direct = os.getenv("REELCLAW_YTDLP_PROXY", "").strip() or os.getenv("YTDLP_PROXY", "").strip()
-    if direct:
+    if direct and _is_valid_proxy_url(direct):
         return direct
 
     secret_id = os.getenv("REELCLAW_YTDLP_PROXY_SECRET_ID", "").strip() or os.getenv("YTDLP_PROXY_SECRET_ID", "").strip()
     if secret_id:
         try:
             value = _read_secret_string(secret_id)
-            if value:
+            if value and _is_valid_proxy_url(value):
                 return value
             if required:
-                raise RuntimeError(f"Proxy secret is empty: {secret_id}. Set it to a proxy URL string.")
+                raise RuntimeError(f"Proxy secret is empty or malformed: {secret_id}. Set it to a proxy URL string.")
         except Exception as exc:
             if required:
                 exc_name = type(exc).__name__
@@ -156,9 +166,12 @@ def _resolve_proxy_url(*, required: bool) -> str:
                 ) from exc
     # Common names used by other repos/tools.
     common = os.getenv("DEFAULT_PROXY_URL", "").strip() or os.getenv("IG_PROXY", "").strip()
-    if common:
+    if common and _is_valid_proxy_url(common):
         return common
-    return _resolve_oxylabs_proxy_url()
+    result = _resolve_oxylabs_proxy_url()
+    if result and not _is_valid_proxy_url(result):
+        return ""
+    return result
 
 
 def _run(cmd: list[str], *, timeout_s: float) -> None:
@@ -180,6 +193,29 @@ def _is_instagram_url(url: str) -> bool:
     if not host:
         return False
     return host == "instagram.com" or host.endswith(".instagram.com")
+
+
+def _cookies_file_has_name(path: Path, cookie_name: str) -> bool:
+    """Best-effort check for a cookie name in a Netscape cookies.txt file."""
+    name = str(cookie_name or "").strip()
+    if not name:
+        return False
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    # Netscape cookie format is tab-separated; cookie name is the 6th field.
+    needle = "\t" + name.lower() + "\t"
+    return needle in raw.lower()
+
+
+def _instagram_cookies_look_logged_in(cookies_path: Path) -> bool:
+    """
+    Heuristic: if the cookies.txt includes `sessionid`, it's very likely authenticated.
+
+    From AWS IP ranges, Instagram often requires a logged-in session for public reels.
+    """
+    return _cookies_file_has_name(cookies_path, "sessionid")
 
 
 def _maybe_write_cookies_file(output_dir: Path, *, required: bool = False) -> Path | None:
@@ -348,13 +384,49 @@ def download_reel(url: str, *, output_dir: Path, timeout_s: float = 180.0) -> Pa
         lower = msg.lower()
         if any(k in lower for k in ("require_login", "login required", "not-logged-in", "sign in", "cookies")):
             secret_id = os.getenv("REELCLAW_YTDLP_COOKIES_SECRET_ID", "").strip()
-            secret_hint = (
-                f"Set AWS Secrets Manager `{secret_id}` to a Netscape cookies.txt (raw or base64)."
+            proxy_hint = ""
+            if not proxy_url and _is_instagram_url(url):
+                proxy_hint = (
+                    " If this keeps happening from AWS IP ranges, you may need a residential proxy "
+                    "(set REELCLAW_YTDLP_PROXY or REELCLAW_YTDLP_PROXY_SECRET_ID)."
+                )
+
+            if cookies_file is None:
+                secret_hint = (
+                    f"Set AWS Secrets Manager `{secret_id}` to a Netscape cookies.txt (raw or base64)."
+                    if secret_id
+                    else "Set REELCLAW_YTDLP_COOKIES_B64 (base64 of a Netscape cookies.txt file)."
+                )
+                raise RuntimeError(
+                    "Reference download blocked (login required). "
+                    + secret_hint
+                    + " This enables Instagram/YouTube downloads."
+                    + proxy_hint
+                ) from exc
+
+            # Cookies were provided but Instagram still blocked. Give a more actionable message.
+            if _is_instagram_url(url) and not _instagram_cookies_look_logged_in(cookies_file):
+                secret_hint2 = (
+                    f"Cookies were provided, but they do not include an authenticated Instagram session (`sessionid`). "
+                    f"Update `{secret_id}` with cookies exported from a logged-in Instagram account (must include `sessionid`)."
+                    if secret_id
+                    else "Cookies were provided, but they do not include an authenticated Instagram session (`sessionid`). Provide logged-in cookies."
+                )
+                raise RuntimeError(
+                    "Reference download blocked (Instagram login required). "
+                    + secret_hint2
+                    + " Alternatively, use Reference → Upload instead of a link."
+                    + proxy_hint
+                ) from exc
+
+            secret_hint3 = (
+                f"Cookies were provided via `{secret_id}`, but Instagram still blocked the download. "
+                "Cookies may be expired or the content may be restricted for that account."
                 if secret_id
-                else "Set REELCLAW_YTDLP_COOKIES_B64 (base64 of a Netscape cookies.txt file)."
+                else "Cookies were provided, but Instagram still blocked the download."
             )
             raise RuntimeError(
-                "Reference download blocked (login required). " + secret_hint + " This enables Instagram/YouTube downloads."
+                "Reference download blocked (login required). " + secret_hint3 + proxy_hint
             ) from exc
         if any(k in lower for k in ("unavailable for certain audiences", "certain audiences", "content may be inappropriate")):
             secret_id = os.getenv("REELCLAW_YTDLP_COOKIES_SECRET_ID", "").strip()

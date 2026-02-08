@@ -70,7 +70,7 @@ struct EditsView: View {
                                         Button {
                                             path.append(.variants(job.jobId))
                                         } label: {
-                                            CompletedTile(job: job)
+                                            JobTile(job: job)
                                         }
                                         .buttonStyle(.plain)
                                         .contextMenu {
@@ -86,12 +86,12 @@ struct EditsView: View {
 
                             if !inProgressJobs.isEmpty {
                                 sectionHeader("In Progress")
-                                VStack(spacing: 12) {
+                                LazyVGrid(columns: gridColumns, spacing: 12) {
                                     ForEach(inProgressJobs) { job in
                                         Button {
                                             path.append(.job(job.jobId))
                                         } label: {
-                                            EditJobCard(job: job)
+                                            JobTile(job: job)
                                         }
                                         .buttonStyle(.plain)
                                         .contextMenu {
@@ -109,41 +109,26 @@ struct EditsView: View {
 
                             if !failedJobs.isEmpty {
                                 sectionHeader("Needs Attention")
-                                VStack(spacing: 12) {
+                                LazyVGrid(columns: gridColumns, spacing: 12) {
                                     ForEach(failedJobs) { job in
-                                        VStack(spacing: 10) {
+                                        Button {
+                                            path.append(.job(job.jobId))
+                                        } label: {
+                                            JobTile(job: job)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .contextMenu {
                                             Button {
-                                                path.append(.job(job.jobId))
+                                                Task { await retry(jobId: job.jobId) }
                                             } label: {
-                                                EditJobCard(job: job, style: .failed)
+                                                Label("Retry", systemImage: "arrow.clockwise")
                                             }
-                                            .buttonStyle(.plain)
-                                            .contextMenu {
-                                                Button(role: .destructive) {
-                                                    deleteCandidate = job
-                                                } label: {
-                                                    Label("Delete edit…", systemImage: "trash")
-                                                }
-                                            }
+                                            .disabled(isDeleting || isCleaningStuckUploads)
 
-                                            HStack(spacing: 10) {
-                                                Button {
-                                                    Task { await retry(jobId: job.jobId) }
-                                                } label: {
-                                                    Label("Retry", systemImage: "arrow.clockwise")
-                                                        .frame(maxWidth: .infinity)
-                                                }
-                                                .buttonStyle(.borderedProminent)
-                                                .disabled(isDeleting || isCleaningStuckUploads)
-
-                                                Button {
-                                                    path.append(.job(job.jobId))
-                                                } label: {
-                                                    Label("Details", systemImage: "info.circle")
-                                                        .frame(maxWidth: .infinity)
-                                                }
-                                                .buttonStyle(.bordered)
-                                                .disabled(isDeleting || isCleaningStuckUploads)
+                                            Button(role: .destructive) {
+                                                deleteCandidate = job
+                                            } label: {
+                                                Label("Delete edit…", systemImage: "trash")
                                             }
                                         }
                                     }
@@ -420,19 +405,46 @@ struct EditsView: View {
     }
 }
 
-private enum EditJobCardStyle {
-    case normal
-    case failed
-}
-
-private struct EditJobCard: View {
+private struct JobTile: View {
     let job: JobSummaryResponse
-    var style: EditJobCardStyle = .normal
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+
+                if let thumb = job.previewThumbnailUrl {
+                    AsyncImage(url: thumb) { phase in
+                        switch phase {
+                        case .empty:
+                            ProgressView()
+                        case .success(let image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        case .failure:
+                            placeholder
+                        @unknown default:
+                            placeholder
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                } else {
+                    placeholder
+                }
+
                 statusBadge
+                    .padding(8)
+            }
+            .frame(height: 170)
+            .clipped()
+
+            HStack(alignment: .firstTextBaseline) {
+                Text(titleText)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
                 Spacer()
                 if let createdAt = job.createdAt {
                     Text(createdAt, style: .relative)
@@ -441,52 +453,45 @@ private struct EditJobCard: View {
                 }
             }
 
-            if let stage = job.stage, !stage.isEmpty {
-                Text(stage)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-            }
-
-            if let msg = job.message, !msg.isEmpty {
-                Text(msg)
+            if let detailLine, !detailLine.isEmpty {
+                Text(detailLine)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
 
-            if let cur = job.progressCurrent, let total = job.progressTotal, total > 0 {
+            if let cur = job.progressCurrent, let total = job.progressTotal, total > 0, job.status != .succeeded {
                 ProgressView(value: Double(max(0, cur)), total: Double(max(1, total)))
                     .progressViewStyle(.linear)
             }
-
-            Text(etaLine)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
         }
-        .padding(14)
-        .background(backgroundColor)
+        .padding(12)
+        .background(Color(.systemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(borderColor, lineWidth: 1)
+                .stroke(Color(.separator).opacity(0.25), lineWidth: 1)
         )
     }
 
-    private var backgroundColor: Color {
-        switch style {
-        case .normal:
-            return Color(.secondarySystemGroupedBackground)
-        case .failed:
-            return Color(.secondarySystemGroupedBackground)
-        }
+    private var placeholder: some View {
+        Image(systemName: placeholderSystemImage)
+            .font(.system(size: 28))
+            .foregroundStyle(.secondary)
     }
 
-    private var borderColor: Color {
-        switch style {
-        case .normal:
-            return Color(.separator).opacity(0.15)
+    private var placeholderSystemImage: String {
+        switch job.status {
+        case .queued:
+            return "clock"
+        case .uploading:
+            return "arrow.up.circle"
+        case .running:
+            return "gearshape.2"
+        case .succeeded:
+            return "play.rectangle"
         case .failed:
-            return Color.red.opacity(0.25)
+            return "xmark.octagon.fill"
         }
     }
 
@@ -517,12 +522,8 @@ private struct EditJobCard: View {
 
     private var statusBackground: Color {
         switch job.status {
-        case .queued:
+        case .queued, .uploading, .running:
             return Color.orange.opacity(0.15)
-        case .uploading:
-            return Color.blue.opacity(0.15)
-        case .running:
-            return Color.purple.opacity(0.12)
         case .succeeded:
             return Color.green.opacity(0.15)
         case .failed:
@@ -532,17 +533,37 @@ private struct EditJobCard: View {
 
     private var statusTextColor: Color {
         switch job.status {
-        case .queued:
+        case .queued, .uploading, .running:
             return .orange
-        case .uploading:
-            return .blue
-        case .running:
-            return .purple
         case .succeeded:
             return .green
         case .failed:
             return .red
         }
+    }
+
+    private var titleText: String {
+        if job.status == .succeeded {
+            return "Edit"
+        }
+        if let stage = job.stage?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !stage.isEmpty
+        {
+            return stage
+        }
+        return statusText
+    }
+
+    private var detailLine: String? {
+        if job.status == .succeeded, let count = job.variantsCount, count > 0 {
+            return count == 1 ? "1 variation" : "\(count) variations"
+        }
+        if let msg = job.message?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !msg.isEmpty
+        {
+            return msg
+        }
+        return etaLine
     }
 
     private var etaLine: String {
@@ -567,72 +588,6 @@ private struct EditJobCard: View {
         if s < 3600 { return "\(max(1, Int(round(Double(s) / 60.0)))) min" }
         let h = Int(round(Double(s) / 3600.0))
         return h == 1 ? "1 hr" : "\(h) hr"
-    }
-}
-
-private struct CompletedTile: View {
-    let job: JobSummaryResponse
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color(.secondarySystemGroupedBackground))
-
-                if let thumb = job.previewThumbnailUrl {
-                    AsyncImage(url: thumb) { phase in
-                        switch phase {
-                        case .empty:
-                            ProgressView()
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .scaledToFill()
-                        case .failure:
-                            placeholder
-                        @unknown default:
-                            placeholder
-                        }
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                } else {
-                    placeholder
-                }
-            }
-            .frame(height: 170)
-            .clipped()
-
-            HStack(alignment: .firstTextBaseline) {
-                Text("Edit")
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                Spacer()
-                if let createdAt = job.createdAt {
-                    Text(createdAt, style: .relative)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if let count = job.variantsCount, count > 0 {
-                Text(count == 1 ? "1 variation" : "\(count) variations")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(12)
-        .background(Color(.systemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color(.separator).opacity(0.25), lineWidth: 1)
-        )
-    }
-
-    private var placeholder: some View {
-        Image(systemName: "play.rectangle")
-            .font(.system(size: 28))
-            .foregroundStyle(.secondary)
     }
 }
 

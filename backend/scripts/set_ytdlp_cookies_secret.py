@@ -12,6 +12,32 @@ def _env(name: str, default: str | None = None) -> str | None:
     return v or default
 
 
+def _filter_netscape_cookies(raw: str, *, domain_substrings: list[str]) -> tuple[str, int]:
+    """
+    Filter a Netscape cookies.txt payload to just the domains we care about.
+
+    Secrets Manager SecretString has a 64KiB limit; full-browser exports can exceed this.
+    """
+    want = [d.strip().lower() for d in domain_substrings if d.strip()]
+    if not want:
+        return raw, 0
+
+    out_lines: list[str] = []
+    kept = 0
+    for ln in (raw or "").splitlines():
+        if not ln.strip():
+            continue
+        if ln.startswith("#"):
+            out_lines.append(ln)
+            continue
+        parts = ln.split("\t")
+        domain = (parts[0] if parts else "").strip().lower()
+        if domain and any(d in domain for d in want):
+            out_lines.append(ln)
+            kept += 1
+    return "\n".join(out_lines).strip() + "\n", kept
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=(
@@ -42,6 +68,31 @@ def main() -> int:
     if not raw.strip():
         raise SystemExit("cookies file is empty")
 
+    max_bytes = 65536
+    raw_bytes = len(raw.encode("utf-8", errors="replace"))
+    if raw_bytes > max_bytes:
+        filtered, kept = _filter_netscape_cookies(
+            raw,
+            domain_substrings=[
+                "instagram.com",
+                "facebook.com",
+                "youtube.com",
+                "google.com",
+            ],
+        )
+        filtered_bytes = len(filtered.encode("utf-8", errors="replace"))
+        print(
+            f"warning: cookies export is {raw_bytes} bytes (Secrets Manager limit {max_bytes}). "
+            f"Filtered to IG/YT domains: kept {kept} cookie lines, now {filtered_bytes} bytes."
+        )
+        raw = filtered
+        raw_bytes = filtered_bytes
+        if raw_bytes > max_bytes:
+            raise SystemExit(
+                f"filtered cookies are still too large ({raw_bytes} bytes). "
+                "Export fewer cookies (only IG/YT) or filter the Netscape cookies.txt before uploading."
+            )
+
     # Gentle sanity check (non-blocking): most valid files include at least one domain line.
     if "instagram.com" not in raw and "youtube.com" not in raw and "google.com" not in raw:
         print("warning: cookies file does not mention instagram.com / youtube.com; verify it is the correct export.")
@@ -54,11 +105,9 @@ def main() -> int:
             f"secret not found: {secret_id} (did you apply Terraform for {env_name}?)"
         ) from None
 
-    size = len(raw.encode("utf-8", errors="replace"))
-    print(f"updated secret {secret_id} ({size} bytes)")
+    print(f"updated secret {secret_id} ({raw_bytes} bytes)")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

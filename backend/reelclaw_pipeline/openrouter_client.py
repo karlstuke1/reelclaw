@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import re
 import time
 import typing as t
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 
 class OpenRouterError(RuntimeError):
@@ -19,6 +21,92 @@ class OpenRouterChatResult:
     raw: dict[str, t.Any]
     usage: dict[str, t.Any] | None
     images: list[str] | None = None
+
+
+def _env(name: str, default: str = "") -> str:
+    v = os.getenv(name, "").strip()
+    return v or default
+
+
+def _usage_log_path() -> Path | None:
+    raw = _env("REELCLAW_OPENROUTER_USAGE_PATH") or _env("OPENROUTER_USAGE_PATH")
+    if not raw:
+        return None
+    try:
+        return Path(raw).expanduser()
+    except Exception:
+        return None
+
+
+def _count_image_parts(messages: list[dict[str, t.Any]]) -> int:
+    n = 0
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "image_url":
+                n += 1
+    return n
+
+
+def _extract_cost_usd(headers: dict[str, str] | None) -> float | None:
+    if not headers:
+        return None
+    h = {str(k).lower(): str(v) for k, v in headers.items() if k}
+    for key in (
+        "x-openrouter-cost",
+        "x-openrouter-cost-usd",
+        "x-openrouter-usage-cost",
+        "x-openrouter-credits-used",
+    ):
+        raw = (h.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            return float(raw)
+        except Exception:
+            continue
+    return None
+
+
+def _append_jsonl(path: Path, obj: dict[str, t.Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=True) + "\n")
+    except Exception:
+        # Best-effort: never crash the pipeline for telemetry.
+        return
+
+
+def _maybe_record_usage(
+    *,
+    model: str,
+    messages: list[dict[str, t.Any]],
+    usage: dict[str, t.Any] | None,
+    headers: dict[str, str] | None,
+    latency_ms: int | None,
+) -> None:
+    log_path = _usage_log_path()
+    if not log_path:
+        return
+    rec: dict[str, t.Any] = {
+        "ts_ms": int(time.time() * 1000),
+        "model": str(model or "").strip(),
+        "image_parts": int(_count_image_parts(messages)),
+        "usage": usage,
+    }
+    if latency_ms is not None:
+        rec["latency_ms"] = int(latency_ms)
+    cost = _extract_cost_usd(headers)
+    if cost is not None:
+        rec["cost_usd"] = float(cost)
+    _append_jsonl(log_path, rec)
 
 
 def normalize_model(model: str) -> str:
@@ -163,14 +251,22 @@ def chat_completions(
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
+            t0 = time.time()
             req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+            resp_headers: dict[str, str] | None = None
             with urllib.request.urlopen(req, timeout=timeout_s) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
+                try:
+                    resp_headers = {str(k): str(v) for k, v in resp.headers.items()}
+                except Exception:
+                    resp_headers = None
+            latency_ms = int(round((time.time() - t0) * 1000.0))
             response_json = json.loads(body)
 
             content = _extract_content(response_json)
             usage = response_json.get("usage") if isinstance(response_json.get("usage"), dict) else None
             images = _extract_images(response_json)
+            _maybe_record_usage(model=model, messages=messages, usage=usage, headers=resp_headers, latency_ms=latency_ms)
             return OpenRouterChatResult(content=content, raw=response_json, usage=usage, images=images)
         except urllib.error.HTTPError as e:
             try:

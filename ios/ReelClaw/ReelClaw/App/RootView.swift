@@ -23,5 +23,7 @@ struct RootView_Previews: PreviewProvider {
     static var previews: some View {
         RootView()
             .environmentObject(SessionStore())
+            .environmentObject(AppRouter())
+            .environmentObject(RecentReferenceStore())
     }
 }

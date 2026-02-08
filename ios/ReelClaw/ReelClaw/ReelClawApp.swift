@@ -12,12 +12,14 @@ struct ReelClawApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var session = SessionStore()
     @StateObject private var router = AppRouter()
+    @StateObject private var recentReferences = RecentReferenceStore()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(session)
                 .environmentObject(router)
+                .environmentObject(recentReferences)
         }
     }
 }

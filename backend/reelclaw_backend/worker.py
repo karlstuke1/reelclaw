@@ -104,6 +104,13 @@ class JobRunner:
 
         variations = int(job.get("variations") or 3)
         burn_overlays = bool(job.get("burn_overlays") or False)
+        reference_reuse_pct = 0.0
+        try:
+            raw_pct = job.get("reference_reuse_pct")
+            reference_reuse_pct = float(raw_pct) if raw_pct is not None else 0.0
+        except Exception:
+            reference_reuse_pct = 0.0
+        reference_reuse_pct = float(max(0.0, min(100.0, reference_reuse_pct)))
         director = str(job.get("director") or "").strip().lower() or None
         if director not in {"code", "gemini", "auto"}:
             director = None
@@ -179,6 +186,8 @@ class JobRunner:
                 cmd.extend(["--director", str(director)])
             if burn_overlays:
                 cmd.append("--burn-overlays")
+            if reference_reuse_pct > 0.0:
+                cmd.extend(["--ref-reuse-pct", str(reference_reuse_pct)])
 
             env = os.environ.copy()
             env["PYTHONPATH"] = str(backend_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import math
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,7 +30,7 @@ from reelclaw_backend.config import Settings, load_settings
 from reelclaw_backend.storage import DeviceStore, JobStore, TokenStore
 from reelclaw_backend.worker import JobRunner
 
-app = FastAPI(title="ReelClaw Backend", version="0.2.0")
+app = FastAPI(title="ReelClaw Backend", version="0.3.0")
 
 
 ############################
@@ -68,6 +69,9 @@ class CreateJobRequest(BaseModel):
     reference: ReferenceSpec
     variations: int = 3
     burn_overlays: bool = False
+    # Percent (0..100) of segments to reuse directly from the reference reel (i.e., keep original
+    # reference clips in the output). When unset/0, the pipeline uses only the user's clips.
+    reference_reuse_pct: float | None = Field(default=None, ge=0.0, le=100.0)
     director: Literal["code", "gemini", "auto"] | None = None
     clips: list[ClipSpec] = Field(default_factory=list)
 
@@ -111,6 +115,7 @@ class JobStatusResponse(BaseModel):
     eta_finish_at: str | None = None
     error_code: str | None = None
     error_detail: str | None = None
+    llm_usage: dict[str, Any] | None = None
 
 
 class JobSummary(BaseModel):
@@ -526,6 +531,10 @@ def _clean_sha256(raw: str | None) -> str | None:
     return s
 
 
+
+
+
+
 @app.post("/v1/jobs", response_model=CreateJobResponse)
 def create_job(body: CreateJobRequest, request: Request, user_id: str = Depends(require_user)) -> CreateJobResponse:
     settings = _get_settings()
@@ -578,6 +587,7 @@ def create_job(body: CreateJobRequest, request: Request, user_id: str = Depends(
         reference=reference,
         variations=variations,
         burn_overlays=bool(body.burn_overlays),
+        reference_reuse_pct=(float(body.reference_reuse_pct) if body.reference_reuse_pct is not None else None),
         director=(str(body.director) if body.director else None),
         clips=clips,
         ttl_seconds=None,
@@ -926,6 +936,7 @@ def get_job(job_id: str, user_id: str = Depends(require_user)) -> JobStatusRespo
         eta_finish_at=eta_finish_at,
         error_code=job.get("error_code"),
         error_detail=job.get("error_detail"),
+        llm_usage=job.get("llm_usage"),
     )
 
 
